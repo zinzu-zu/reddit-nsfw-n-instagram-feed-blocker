@@ -130,15 +130,19 @@ async function checkTab(tabId, url) {
   if (v.block) chrome.tabs.update(tabId, { url: blockedUrl(v.reason, v.name) });
 }
 
-// Catches typed addresses, links, and new Reddit's in-page navigation.
-chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+// Catches typed addresses, links, new tabs, and new Reddit's in-page navigation.
+const REDDIT_TABS = ['*://*.reddit.com/*'];
+function onTabUpdated(tabId, info, tab) {
   const url = info.url || (info.status === 'loading' ? tab.url : null);
   if (url) checkTab(tabId, url);
-});
-chrome.tabs.onCreated.addListener(tab => {
-  const url = tab.pendingUrl || tab.url;
-  if (url) checkTab(tab.id, url);
-});
+}
+// Firefox can filter tab events, so the add-on isn't woken for every change on
+// every site (title, icon, loading...). That matters most on Android.
+try {
+  chrome.tabs.onUpdated.addListener(onTabUpdated, { urls: REDDIT_TABS, properties: ['url', 'status'] });
+} catch {
+  chrome.tabs.onUpdated.addListener(onTabUpdated); // Chromium has no filter
+}
 
 // Content scripts ask about the current page and about subreddits in feeds.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -160,7 +164,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // On startup, sweep tabs that were already open.
 async function sweep() {
-  for (const tab of await chrome.tabs.query({})) if (tab.url) checkTab(tab.id, tab.url);
+  for (const tab of await chrome.tabs.query({ url: REDDIT_TABS })) if (tab.url) checkTab(tab.id, tab.url);
 }
 chrome.runtime.onStartup.addListener(sweep);
 chrome.runtime.onInstalled.addListener(sweep);
