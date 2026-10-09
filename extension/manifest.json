@@ -1,0 +1,114 @@
+{
+  "manifest_version": 3,
+  "name": "Reddit NSFW Blocker",
+  "version": "1.1.1",
+  "description": "Blocks adult-only subreddits, hides NSFW posts and the Reddit home feed, hides the Instagram feed, and blocks adult media hosts.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "*://*.reddit.com/*",
+    "*://*.redd.it/*",
+    "*://*.instagram.com/*",
+    "*://*.redgifs.com/*",
+    "*://*.erome.com/*",
+    "*://*.pornhub.com/*",
+    "*://*.xvideos.com/*",
+    "*://*.xhamster.com/*",
+    "*://*.xnxx.com/*",
+    "*://*.onlyfans.com/*",
+    "*://*.fansly.com/*",
+    "*://*.scrolller.com/*",
+    "*://*.imagefap.com/*",
+    "*://*.spankbang.com/*",
+    "*://*.eporner.com/*",
+    "*://*.rule34.xxx/*",
+    "*://*.motherless.com/*",
+    "*://*.chaturbate.com/*",
+    "*://*.stripchat.com/*",
+    "*://*.youporn.com/*",
+    "*://*.redtube.com/*",
+    "*://*.tube8.com/*",
+    "*://*.porn.com/*",
+    "*://*.nhentai.net/*",
+    "*://*.e-hentai.org/*",
+    "*://*.hanime.tv/*",
+    "*://*.fapello.com/*",
+    "*://*.thothub.to/*",
+    "*://*.coomer.su/*",
+    "*://*.kemono.su/*",
+    "*://*.manyvids.com/*",
+    "*://*.cam4.com/*",
+    "*://*.bongacams.com/*"
+  ],
+  "incognito": "spanning",
+  "background": {
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.reddit.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "hide.css"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "*://*.instagram.com/*"
+      ],
+      "js": [
+        "instagram.js"
+      ],
+      "css": [
+        "instagram.css"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "adult_hosts",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "blocked.html",
+        "blocked.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "reddit-nsfw-blocker@self-hosted",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  }
+}

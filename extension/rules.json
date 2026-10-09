@@ -1,0 +1,99 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/blocked.html?reason=host"
+      }
+    },
+    "condition": {
+      "requestDomains": [
+        "redgifs.com",
+        "erome.com",
+        "pornhub.com",
+        "xvideos.com",
+        "xhamster.com",
+        "xnxx.com",
+        "onlyfans.com",
+        "fansly.com",
+        "scrolller.com",
+        "imagefap.com",
+        "spankbang.com",
+        "eporner.com",
+        "rule34.xxx",
+        "motherless.com",
+        "chaturbate.com",
+        "stripchat.com",
+        "youporn.com",
+        "redtube.com",
+        "tube8.com",
+        "porn.com",
+        "nhentai.net",
+        "e-hentai.org",
+        "hanime.tv",
+        "fapello.com",
+        "thothub.to",
+        "coomer.su",
+        "kemono.su",
+        "manyvids.com",
+        "cam4.com",
+        "bongacams.com"
+      ],
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "requestDomains": [
+        "redgifs.com",
+        "erome.com",
+        "pornhub.com",
+        "xvideos.com",
+        "xhamster.com",
+        "xnxx.com",
+        "onlyfans.com",
+        "fansly.com",
+        "scrolller.com",
+        "imagefap.com",
+        "spankbang.com",
+        "eporner.com",
+        "rule34.xxx",
+        "motherless.com",
+        "chaturbate.com",
+        "stripchat.com",
+        "youporn.com",
+        "redtube.com",
+        "tube8.com",
+        "porn.com",
+        "nhentai.net",
+        "e-hentai.org",
+        "hanime.tv",
+        "fapello.com",
+        "thothub.to",
+        "coomer.su",
+        "kemono.su",
+        "manyvids.com",
+        "cam4.com",
+        "bongacams.com"
+      ],
+      "resourceTypes": [
+        "sub_frame",
+        "image",
+        "media",
+        "script",
+        "xmlhttprequest",
+        "other",
+        "object"
+      ]
+    }
+  }
+]

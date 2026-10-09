@@ -1,0 +1,5 @@
+*.zip
+*.xpi
+*.mobileconfig
+signed/
+.DS_Store

@@ -1,0 +1,36 @@
+/* Instagram feed off (html.rnb-ig-nofeed is set by instagram.js on feed pages).
+   A full-screen cover hides whatever Instagram draws underneath, and the
+   page can't scroll, so no more posts load. */
+html.rnb-ig-nofeed, html.rnb-ig-nofeed body {
+  overflow: hidden !important;
+}
+html.rnb-ig-nofeed article,
+html.rnb-ig-nofeed video {
+  display: none !important;
+}
+#rnb-ig-cover {
+  position: fixed; inset: 0; z-index: 2147483647;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; box-sizing: border-box;
+  background: #f6f6f4;
+  font: 15px/1.45 system-ui, -apple-system, sans-serif;
+}
+#rnb-ig-cover .rnb-card {
+  width: min(24rem, 100%); box-sizing: border-box; padding: 20px;
+  display: flex; flex-direction: column; gap: 8px; text-align: center;
+  background: #fff; color: #1d1d1b; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.12);
+}
+#rnb-ig-cover strong { font-size: 17px; }
+#rnb-ig-cover span { color: #6b6b66; }
+#rnb-ig-cover input {
+  width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px 12px; font: inherit; font-size: 16px;
+  border: 1px solid #ccc; border-radius: 8px; background: #fff; color: #1d1d1b;
+}
+#rnb-ig-cover a { color: #2f6f4f; padding: 6px; }
+@media (prefers-color-scheme: dark) {
+  #rnb-ig-cover { background: #111211; }
+  #rnb-ig-cover .rnb-card { background: #1f201f; color: #ececea; }
+  #rnb-ig-cover span { color: #9a9a94; }
+  #rnb-ig-cover input { background: #161716; color: #ececea; border-color: #444; }
+  #rnb-ig-cover a { color: #7cc39c; }
+}

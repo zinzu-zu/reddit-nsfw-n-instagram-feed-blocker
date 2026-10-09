@@ -1,0 +1,45 @@
+/* Hidden before any script runs, so flagged posts never flash on screen. */
+.thing.over18,
+.thing[data-nsfw="true"],
+shreddit-post[nsfw]:not([nsfw="false"]),
+shreddit-post[over-18]:not([over-18="false"]),
+shreddit-post[is-nsfw]:not([is-nsfw="false"]),
+shreddit-ad-post[nsfw]:not([nsfw="false"]),
+[data-testid="search-post-unit"]:has(.nsfw-tag, [slot="nsfw-tag"]),
+article:has(shreddit-post[nsfw]:not([nsfw="false"])),
+shreddit-post:has(shreddit-blurred-container[reason="nsfw"]),
+img[src*="redgifs.com"], video[src*="redgifs.com"], iframe[src*="redgifs.com"],
+img[src*="erome.com"], iframe[src*="erome.com"] {
+  display: none !important;
+}
+
+/* Home feed off (html.rnb-nofeed is set by content.js on feed pages). */
+html.rnb-nofeed shreddit-feed,
+html.rnb-nofeed shreddit-post,
+html.rnb-nofeed shreddit-ad-post,
+html.rnb-nofeed faceplate-batch,
+html.rnb-nofeed article,
+html.rnb-nofeed #siteTable,
+html.rnb-nofeed .thing.link,
+html.rnb-nofeed .nav-buttons,
+html.rnb-nofeed [data-testid="post-container"] {
+  display: none !important;
+}
+#rnb-feed-notice {
+  position: fixed; z-index: 2147483647; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(26rem, calc(100vw - 32px)); box-sizing: border-box; padding: 20px;
+  display: flex; flex-direction: column; gap: 8px; text-align: center;
+  font: 15px/1.45 system-ui, -apple-system, sans-serif;
+  background: #fff; color: #1d1d1b; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.18);
+}
+#rnb-feed-notice strong { font-size: 17px; }
+#rnb-feed-notice span { color: #6b6b66; }
+#rnb-feed-notice input {
+  width: 100%; box-sizing: border-box; margin-top: 6px; padding: 9px 12px; font: inherit;
+  border: 1px solid #ccc; border-radius: 8px; background: #fff; color: #1d1d1b;
+}
+@media (prefers-color-scheme: dark) {
+  #rnb-feed-notice { background: #1f201f; color: #ececea; }
+  #rnb-feed-notice span { color: #9a9a94; }
+  #rnb-feed-notice input { background: #161716; color: #ececea; border-color: #444; }
+}
