@@ -57,7 +57,8 @@ async function fetchVerdict(kind, name) {
   const path = kind === 'u' ? `user/${name}` : `r/${name}`;
   try {
     const res = await throttled(() =>
-      fetch(`https://www.reddit.com/${path}/about.json?raw_json=1`, { credentials: 'include' }));
+      // Give up after 8s so one stuck request can't hold up every lookup after it.
+      fetch(`https://www.reddit.com/${path}/about.json?raw_json=1`, { credentials: 'include', signal: AbortSignal.timeout(8000) }));
     if (!res.ok) return { nsfw: hintSays(kind, name), ttl: TTL_UNKNOWN };
     const json = await res.json();
     const d = json && json.data;
