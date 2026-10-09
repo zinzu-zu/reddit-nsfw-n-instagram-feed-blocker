@@ -20,6 +20,7 @@
       '<span>Go to a profile, or open your messages.</span>' +
       '<form><input type="text" name="u" placeholder="Username" aria-label="Instagram username" autocapitalize="off" autocomplete="off"></form>' +
       '<a href="/direct/inbox/">Open messages</a>' +
+      '<a href="/accounts/login/">Log in</a>' +
       '</div>';
     return cover;
   }
@@ -52,7 +53,9 @@
     }
   }
 
-  const tick = () => setCover(FEED_PATHS.test(location.pathname));
+  // Logged out, Instagram shows its login form at "/", so leave that visible.
+  const loginForm = () => document.querySelector('input[type="password"], input[name="password"]');
+  const tick = () => setCover(FEED_PATHS.test(location.pathname) && !loginForm());
   tick();
   document.addEventListener('DOMContentLoaded', tick);
   // Instagram changes pages without reloading, so keep checking.
