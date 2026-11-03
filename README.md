@@ -63,6 +63,10 @@ Android doesn't let an adult's phone be locked by someone else without device-ma
    - an accountability or blocker app with uninstall protection and a password your friend holds (BlockerX is one well-known example)
    - setting a device-management app as the phone's "device owner", which can block uninstalling and lock settings. This needs a fresh factory reset and a computer to set up.
 
+## YouTube time limit on Android
+
+[Watch Limit](watch-limit/README.md) is a small Android app that limits YouTube to a daily amount of screen-on watching. Listening with the screen off or with YouTube in the background never counts. On a phone where OwnDroid is the device owner, it can't be switched off, uninstalled or loosened on a whim: loosening a setting waits 24 hours or more.
+
 ## Other deeper options I considered
 
 - **Hosts file blocklist.** It's admin-only to edit, but it adds little over the DNS filter you already have.

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Watch Limit</string>
+    <string name="service_description">Counts the time YouTube is on your screen and covers it once your daily limit is used up. Audio that plays with the screen off, or behind other apps, never counts and keeps playing. Watch Limit only looks at which apps have windows on screen, and it has no internet access.</string>
+</resources>
