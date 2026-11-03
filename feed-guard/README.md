@@ -31,7 +31,7 @@ Do this during the OwnDroid setup in the "Tighter Android lock" guide. **Install
 2. **Turn it on.** Open Feed Guard, tap **Open accessibility settings**, choose **Feed Guard** and turn it on. Allow notifications when it asks.
 3. **Settings › Apps › Feed Guard:** turn off **Pause app activity if unused**.
 4. **In OwnDroid:**
-   - Tap the shield icon › **Delegated admins** › add `io.github.zinzuzu.feedguard` with **Change package state**.
+   - Tap the shield icon › **Delegated admins** › add `io.github.zinzuzu.feedguard` with **Change package state**. Feed Guard pauses Chrome, Firefox Focus and any other browser straight away.
    - **Applications**: open Feed Guard and turn on **Block uninstall** and **Disable user control**. Do the same for **Firefox**, so it can't be uninstalled or have its data cleared, either of which would remove the add-on.
 5. **Make Firefox your default browser** (Settings › Apps › Default apps › Browser), so links from other apps open in Firefox rather than in a paused browser.
 6. **Arm it.** Once Firefox has add-on version 1.2.0 or newer, open instagram.com in Firefox. Feed Guard says "Feed Guard is on" and the status screen shows **Add-on check: Active**.

@@ -1,6 +1,7 @@
 package io.github.zinzuzu.feedguard;
 
 import android.accessibilityservice.AccessibilityService;
+import android.app.admin.DevicePolicyManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -230,7 +231,12 @@ public final class GuardService extends AccessibilityService {
         packages.addAction(Intent.ACTION_PACKAGE_ADDED);
         packages.addAction(Intent.ACTION_PACKAGE_CHANGED);
         packages.addDataScheme("package");
+        // Managed configuration changed, or OwnDroid just gave (or took back) the
+        // "Change package state" permission: scan again straight away rather than
+        // at the next 15-minute check. The delegation broadcast only reaches
+        // receivers registered at runtime, like this one.
         IntentFilter config = new IntentFilter(Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED);
+        config.addAction(DevicePolicyManager.ACTION_APPLICATION_DELEGATION_SCOPES_CHANGED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(packageReceiver, packages, Context.RECEIVER_NOT_EXPORTED);
             registerReceiver(configReceiver, config, Context.RECEIVER_NOT_EXPORTED);
