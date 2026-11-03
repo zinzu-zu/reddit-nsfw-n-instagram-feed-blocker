@@ -6,7 +6,7 @@ A browser extension for Firefox (Mac and Android) and Edge that keeps adult cont
 
 - **Adult-only subreddits and profiles.** Any `r/...` or `u/...` page that Reddit marks as over-18 (checked through Reddit's own `about.json`) is replaced with a "blocked" page. Typing the address, following a link, and new Reddit's in-page navigation are all caught. Multireddits (`r/a+b`) are checked one by one.
 - **The home feed.** On the front page (and `/best`, `/hot`, `/new`, `/top`), as well as on `r/popular` and `r/all`, the posts are hidden. In their place is a small box with a Reddit search field. Everything else still works as normal: subreddits, posts, comments, search and profiles. To allow `r/popular` and `r/all` again, set `HIDE_POPULAR_AND_ALL = false` in `content.js`.
-- **Instagram's feeds.** The home feed, Explore and the Reels tab are hidden. In their place is a box where you can type a username or open your messages. Profiles, messages, stories, search, and single posts or reels opened from a message all still work. The Instagram app isn't covered, only instagram.com in Firefox.
+- **Instagram's feeds.** The home feed, Explore and the Reels tab are hidden. In their place is a box where you can type a username or open your messages. Profiles, messages, stories, search, and single posts or reels opened from a message all still work. The Instagram app isn't covered, only instagram.com in Firefox. On Android, Feed Guard pauses the app instead.
 - **NSFW posts everywhere else, including search**, on new Reddit and old Reddit. Posts carrying Reddit's NSFW flag are hidden. Posts from an adult-only subreddit are also hidden even when nobody tagged the post.
 - **Reddit's "are you over 18?" gate** (`/over18`) and `r/randnsfw`.
 - **Adult media hosts** (redgifs, erome, pornhub, onlyfans and about 25 others in `extension/rules.json`). These are blocked everywhere in the browser, not just on Reddit: pages redirect to the blocked page, and embedded images and videos don't load.
@@ -59,9 +59,11 @@ Android doesn't let an adult's phone be locked by someone else without device-ma
 
 1. **Firefox with the extension.** Once the add-on is listed on addons.mozilla.org (step 1 above, **On this site**), open its page in Firefox for Android and tap **Add to Firefox**. This gives you the same Reddit filtering as on the Mac.
 2. **Reddit's own setting.** In Reddit, go to Settings > Account settings > Content and turn off **Show mature (18+) content**. Reddit then filters NSFW on its side, in the Reddit app and in Chrome, as long as you're logged in. Deleting the Reddit app and using Reddit in Firefox is stronger still.
-3. **Making it hard to undo.** Nothing on a normal Android phone stops you removing the add-on. For a real lock there are two routes:
-   - an accountability or blocker app with uninstall protection and a password your friend holds (BlockerX is one well-known example)
-   - setting a device-management app as the phone's "device owner", which can block uninstalling and lock settings. This needs a fresh factory reset and a computer to set up.
+3. **Making it hard to undo.** Firefox for Android can't lock an add-on, so the phone uses **Feed Guard** ([`feed-guard/`](feed-guard/README.md)), a small app that works with OwnDroid as the phone's device owner:
+   - Instagram and Reddit only open in Firefox while the add-on is running on the page. From version 1.2.0 the add-on puts an invisible marker on those pages (`guard-marker.js` and `guard-marker.css`), and Feed Guard covers the page when the marker is missing.
+   - Other browsers, and the Instagram and Reddit apps, are paused when they're installed.
+   - Turning Feed Guard off pauses Firefox.
+   The full phone setup, including the friend-held code that locks OwnDroid, is in the "Tighter Android lock" guide.
 
 ## Other deeper options I considered
 

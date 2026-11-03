@@ -10,3 +10,4 @@ Notes for whoever changes the extension next.
   3. Mozilla reviews the version, and devices pick it up within about a day.
 - If those secrets aren't available, upload `extension-upload.zip` by hand on the add-on's page with **Upload New Version**, and choose **On this site**.
 - The Mac profile must point at the listed add-on. To set that up, run `lockdown.sh` with the add-on's short name instead of the `.xpi`. Until that's done, the Mac only updates through `lockdown/update.sh`.
+- From 1.2.0, `guard-marker.js` and `guard-marker.css` add an invisible "feedguard <time>" marker to Instagram and Reddit pages for the Feed Guard app on Android (`feed-guard/`). Keep the element id `rnb-guard-marker`, the label format and the stylesheet trick (hidden inline, shown by the add-on's CSS) unchanged, or Feed Guard will cover those pages on the phone.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reddit NSFW Blocker",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Blocks adult-only subreddits, hides NSFW posts and the Reddit home feed, hides the Instagram feed, and blocks adult media hosts.",
   "permissions": [
     "storage",
@@ -56,10 +56,12 @@
         "*://*.reddit.com/*"
       ],
       "js": [
+        "guard-marker.js",
         "content.js"
       ],
       "css": [
-        "hide.css"
+        "hide.css",
+        "guard-marker.css"
       ],
       "run_at": "document_start",
       "all_frames": true
@@ -69,10 +71,12 @@
         "*://*.instagram.com/*"
       ],
       "js": [
+        "guard-marker.js",
         "instagram.js"
       ],
       "css": [
-        "instagram.css"
+        "instagram.css",
+        "guard-marker.css"
       ],
       "run_at": "document_start"
     }

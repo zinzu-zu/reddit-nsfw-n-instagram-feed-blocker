@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+    <restriction
+        android:key="allowed_apps"
+        android:title="@string/r_allowed_title"
+        android:description="@string/r_allowed_desc"
+        android:restrictionType="string"
+        android:defaultValue="" />
+    <restriction
+        android:key="blocked_apps"
+        android:title="@string/r_blocked_title"
+        android:description="@string/r_blocked_desc"
+        android:restrictionType="string"
+        android:defaultValue="" />
+</restrictions>
