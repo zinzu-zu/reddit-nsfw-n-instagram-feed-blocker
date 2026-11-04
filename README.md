@@ -63,7 +63,7 @@ Android doesn't let an adult's phone be locked by someone else without device-ma
    - Instagram and Reddit only open in Firefox while the add-on is running on the page. From version 1.2.0 the add-on puts an invisible marker on those pages (`guard-marker.js` and `guard-marker.css`), and Feed Guard covers the page when the marker is missing.
    - Other browsers, and the Instagram and Reddit apps, are paused when they're installed.
    - Turning Feed Guard off pauses Firefox.
-   The full phone setup, including the friend-held code that locks OwnDroid, is in the "Tighter Android lock" guide.
+   The full phone setup, including the code that locks OwnDroid, sealed on the Mac by [`owndroid-key`](owndroid-key/README.md), is in the "Tighter Android lock" guide. For a new or reset phone, [`phone-kit`](phone-kit/README.md) does that setup from the Mac over USB, with your settings in one file.
 
 ## Other deeper options I considered
 

@@ -1,0 +1,5 @@
+# Your settings (your NextDNS address and apps) stay on your Mac.
+my-phone.conf
+# The apps: the kit zip in project files carries Feed Guard and Watch Limit,
+# and OwnDroid is downloaded on the first run.
+apks/

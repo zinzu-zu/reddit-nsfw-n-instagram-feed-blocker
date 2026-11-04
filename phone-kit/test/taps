@@ -1,0 +1,84 @@
+#!/bin/bash
+# taps: the person at the phone, for phone-kit's tests. The kit runs it with
+# the name of each point where it waits for them, and it does what the kit
+# asked for there, on the pretend phone. Files in $FAKE_PHONE/taps change that:
+#   skip-POINT        a number: do nothing there that many times
+#   unplug-at-POINT   pull the cable there instead
+#   forget-shortcuts  leave Shortcuts on the first time they're asked off
+#   hide, protect     the apps to hide and protect at "locks"
+#   no-default-apps   don't lock the default apps at "locks"
+set -u
+. "$(dirname "$0")/phone-lib.sh"
+point=$1
+note taps.log "$point"
+
+if [ -f "$P/taps/skip-$point" ]; then
+  n=$(cat "$P/taps/skip-$point")
+  if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$P/taps/skip-$point"; exit 0; fi
+fi
+if [ -f "$P/taps/unplug-at-$point" ]; then
+  rm -f "$P/plugged" "$P/taps/unplug-at-$point"
+  exit 0
+fi
+
+shortcuts_off() {
+  if [ -f "$P/taps/forget-shortcuts" ]; then rm -f "$P/taps/forget-shortcuts"; return; fi
+  put od/shortcuts 0
+}
+
+case "$point" in
+  wait-phone) touch "$P/plugged" "$P/authorized" ;;
+  firefox)    # signs in to Google and installs Firefox from the Play Store
+    make_app "$FF" 0 145.0.1 2016100000 launcher browser
+    put accounts 1 ;;
+  browser) put role-browser "$FF" ;;
+  api-field)  # Settings › API: Enable on, the key field cleared and tapped
+    shortcuts_off
+    put od/api-switch 1
+    put od/focus api-key
+    : > "$P/od/field" ;;
+  api-apply)
+    if [ "$(f od/api-switch)" = 1 ] && [ "$(wc -c < "$P/od/field")" -ge 8 ]; then
+      put od/api-enabled 1
+      cp "$P/od/field" "$P/od/api-key"
+      echo >> "$P/od/api-key"
+    fi
+    put od/focus none ;;
+  shortcuts-off) shortcuts_off ;;
+  delegations)
+    for p in "$FG" "$WL"; do installed "$p" && add "deleg/$p" delegation-package-access; done ;;
+  import)     # OwnDroid's import: a list of {"id", and one value}, or "Failed"
+    file="$P/fs/sdcard/Download/feed-guard-settings.json"
+    if [ -f "$file" ] && python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert isinstance(d, list)
+for x in d:
+    assert isinstance(x, dict) and set(x) <= {"id", "vInt", "vString", "vBool", "vList"} and "id" in x
+    assert len(x) == 2
+' "$file" 2>/dev/null; then
+      cp "$file" "$P/pkg/$FG/config"
+      note od/toasts Success
+    else
+      note od/toasts Failed
+    fi ;;
+  locks)
+    for r in disallow_config_private_dns no_config_vpn no_network_reset no_add_user no_user_switch \
+        no_config_date_time no_safe_boot; do restrict_add "$r"; done
+    [ "$(sdk)" -lt 35 ] || restrict_add no_add_private_profile
+    [ -f "$P/taps/no-default-apps" ] || [ "$(sdk)" -lt 34 ] || restrict_add disallow_config_default_apps
+    for p in $(cat "$P/taps/hide" 2>/dev/null || echo com.android.chrome org.mozilla.focus io.nextdns.NextDNS); do
+      installed "$p" && touch "$P/pkg/$p/hidden"
+    done
+    for p in "$FG" "$WL" "$FF" $(cat "$P/taps/protect" 2>/dev/null); do
+      installed "$p" && { add blocked-uninstall "$p"; add no-control "$p"; }
+    done ;;
+  api-off)
+    put od/api-switch 0
+    put od/api-enabled 0
+    shortcuts_off ;;
+  debug) restrict_add no_debugging_features ;;
+  *) ;;   # apps, import-check, import-again, api-taps, watch-limit, audit-hand,
+          # nextdns, addon, instagram, key: nothing to do on the phone
+esac
+exit 0
