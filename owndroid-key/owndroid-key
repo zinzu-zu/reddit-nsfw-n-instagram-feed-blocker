@@ -1,0 +1,827 @@
+#!/bin/bash
+# owndroid-key: keeps OwnDroid's app-lock key sealed on this Mac until a date,
+# out of reach of everything you can run from your own account.
+#
+# OwnDroid's app lock opens with a 6-digit TOTP code. The secret behind those
+# codes is sealed with drand timelock encryption (tle) in a folder only root
+# can read, and a root service does everything that touches it. Your account
+# only ever gets codes, and only while the key is open: from the date you
+# pick, for a window (24 hours unless you choose otherwise), once every period.
+# When a window ends, the service seals the same secret again until the next
+# date.
+#
+#   owndroid-key seal --open "YYYY-MM-DD HH:MM" --every 30d [--window 24h]
+#   owndroid-key code      a code for OwnDroid, while the key is open
+#   owndroid-key status    when the key opens next
+#
+# Run as root by launchd (see install.sh):
+#   owndroid-key relock    every 15 minutes: seal the key again once a window is over
+#   owndroid-key serve     answers one request on the service's socket
+#
+# Whether the key is open is never decided by a clock. Only drand can open a
+# sealed file, by publishing the round it was sealed to, and the end of a
+# window is a second sealed file that opens when the window is over. The clock
+# only turns your first date into a round, and shows dates.
+#
+# Written for the /bin/bash 3.2 that comes with macOS.
+
+set -u
+umask 077
+
+PROG=owndroid-key
+ROOT="${OWNDROID_KEY_ROOT:-/Library/Application Support/OwnDroidKey}"
+SOCK="${OWNDROID_KEY_SOCKET:-/var/run/io.github.zinzuzu.owndroid-key.sock}"
+LOGFILE="${OWNDROID_KEY_LOG:-/Library/Logs/owndroid-key.log}"
+DATA="$ROOT/sealed"          # only root can open this folder
+KEY="$DATA/key.tle"          # the secret, sealed to the round the key opens
+END="$DATA/end.tle"          # no secret: sealed to the round the window closes
+STATE="$DATA/schedule"       # dates and lengths
+HOLD="$DATA/rekey"           # when a new key started being set up
+ERRFILE="$DATA/.tle-error.$$" # each request its own, so two at once don't mix them up
+LOCK="$DATA/.lock"
+PERIOD=3                     # drand's quicknet, tle's default: a round every 3 s
+HOLD_FOR=7200                # a new key started in a window may be sealed this long after
+OPENSSL=/usr/bin/openssl
+[ -x "$OPENSSL" ] || OPENSSL=openssl
+
+SECRET=""
+LOCKED=""
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "$PROG: $*"; exit 1; }
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOGFILE" 2>/dev/null; }
+is_number() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; [ ${#1} -le 12 ]; }
+
+usage() {
+  cat >&2 <<EOF
+Usage:
+  $PROG seal --open "YYYY-MM-DD HH:MM" --every 30d [--window 24h]
+      Seal OwnDroid's key until the date, then open it for the window
+      (24 hours unless you say otherwise) once every period after that.
+      While the key is open, run it without options to set up a new key
+      on the same schedule.
+  $PROG code      Show a code for OwnDroid, while the key is open.
+  $PROG status    Show when the key opens next.
+EOF
+}
+
+# --- Dates and lengths ----------------------------------------------------
+
+# "YYYY-MM-DD HH:MM", local time -> seconds. BSD date on macOS; GNU date in tests.
+to_epoch() {
+  date -j -f '%Y-%m-%d %H:%M:%S' "$1:00" +%s 2>/dev/null || date -d "$1" +%s 2>/dev/null
+}
+
+show_date() {
+  { date -r "$1" '+%a %e %b %Y at %H:%M' 2>/dev/null || date -d "@$1" '+%a %e %b %Y at %H:%M'; } | tr -s ' '
+}
+
+# 24h, 30d, 4w -> seconds
+to_seconds() {
+  local n unit
+  n=${1%?}
+  unit=${1#"$n"}
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ ${#n} -le 5 ] || return 1
+  case "$unit" in
+    h) echo $((n * 3600)) ;;
+    d) echo $((n * 86400)) ;;
+    w) echo $((n * 604800)) ;;
+    *) return 1 ;;
+  esac
+}
+
+plural() { if [ "$1" -eq 1 ]; then echo "1 $2"; else echo "$1 ${2}s"; fi; }
+in_hours() { plural $(($1 / 3600)) hour; }                 # 86400 -> 24 hours
+in_days() {                                                # 2592000 -> 30 days
+  if [ $(($1 % 86400)) -eq 0 ]; then plural $(($1 / 86400)) day; else in_hours "$1"; fi
+}
+
+# --- TOTP codes -----------------------------------------------------------
+
+# Base32 (RFC 4648) to hex.
+base32_hex() {
+  local s=$1 abc=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567 i=0 c pre v=0 n=0 out=""
+  while [ "$i" -lt "${#s}" ]; do
+    c=${s:$i:1}
+    pre=${abc%%"$c"*}
+    [ "${#pre}" -lt 32 ] || return 1
+    v=$(( (v << 5) | ${#pre} ))
+    n=$((n + 5))
+    if [ "$n" -ge 8 ]; then
+      n=$((n - 8))
+      out=$out$(printf '%02x' $(( (v >> n) & 255 )))
+      v=$(( v & ((1 << n) - 1) ))
+    fi
+    i=$((i + 1))
+  done
+  printf '%s\n' "$out"
+}
+
+# Hex in, bytes out.
+hex_bytes() { printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"; }
+
+sha1_hex() { "$OPENSSL" dgst -sha1 2>/dev/null | sed 's/^.*= *//'; }
+
+# HMAC-SHA1 (RFC 2104) of a hex message under a hex key of up to 64 bytes.
+# Built from plain SHA-1 so that the key only ever goes through pipes, never
+# onto a command line.
+hmac_sha1() {
+  local key=$1 i=0 b ipad="" opad="" inner
+  [ "${#key}" -le 128 ] || return 1
+  while [ "${#key}" -lt 128 ]; do key=${key}00; done
+  while [ "$i" -lt 128 ]; do
+    b=$(( 0x${key:$i:2} ))
+    ipad=$ipad$(printf '%02x' $(( b ^ 0x36 )))
+    opad=$opad$(printf '%02x' $(( b ^ 0x5c )))
+    i=$((i + 2))
+  done
+  inner=$(hex_bytes "$ipad$2" | sha1_hex)
+  [ "${#inner}" -eq 40 ] || return 1
+  hex_bytes "$opad$inner" | sha1_hex
+}
+
+# The 6-digit code for a base32 secret at a time (now if none is given):
+# RFC 6238 with HMAC-SHA1 and 30-second steps, the codes OwnDroid checks.
+totp() {
+  local hex mac off
+  hex=$(base32_hex "$1") || return 1
+  [ -n "$hex" ] || return 1
+  mac=$(hmac_sha1 "$hex" "$(printf '%016x' $(( ${2:-$(date +%s)} / 30 )))") || return 1
+  [ "${#mac}" -eq 40 ] || return 1
+  off=$(( 0x${mac:39:1} * 2 ))
+  printf '%06d\n' $(( (0x${mac:$off:8} & 0x7fffffff) % 1000000 ))
+}
+
+# --- Root side: the sealed folder -----------------------------------------
+
+# Only tools root owns: tle sits in $ROOT/bin, which only root can change.
+root_setup() {
+  PATH="$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  export PATH
+  trap cleanup EXIT
+  mkdir -p "$DATA" 2>/dev/null && chmod 700 "$DATA" 2>/dev/null || return 1
+  command -v tle >/dev/null 2>&1
+}
+
+cleanup() {
+  rm -f "$ERRFILE" 2>/dev/null
+  [ -z "$LOCKED" ] || rmdir "$LOCK" 2>/dev/null
+}
+
+get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n 1; }
+
+write_state() {  # open_at every window, into $STATE.new
+  {
+    echo "# owndroid-key schedule: dates and lengths, nothing secret."
+    echo "OPEN_AT=$1"
+    echo "EVERY=$2"
+    echo "WINDOW=$3"
+  } > "$STATE.new"
+}
+
+# Puts the new key, end marker and schedule in place. Everything is written
+# first, so a full disk stops it before anything is replaced.
+commit() {
+  mv -f "$KEY.new" "$KEY" && mv -f "$END.new" "$END" && mv -f "$STATE.new" "$STATE"
+}
+
+# The drand round a sealed file opens at, from its header.
+round_of() { LC_ALL=C grep -a -m 1 '^-> tlock ' "$1" 2>/dev/null | awk '{print $3}'; }
+
+# tle needs exactly one of -e (seal) or -d (open), although its help says -e is
+# the default.
+
+# Prints what a sealed file holds, once drand has reached its round.
+unseal() { tle -d "$1" 2>"$ERRFILE"; }
+
+opens() { tle -d "$1" >/dev/null 2>"$ERRFILE"; }
+
+# After a failed unseal: true if the file is simply still sealed, false if
+# drand couldn't be reached. tle reports both as "too early", naming the
+# round it needs and the round the clock expects. A needed round that the
+# clock says has passed means the network failed.
+still_sealed() {
+  local need now
+  grep -q 'too early' "$ERRFILE" 2>/dev/null || return 1
+  need=$(sed -n 's/.*expected round \([0-9]*\) > \([0-9]*\) current round.*/\1/p' "$ERRFILE" | head -n 1)
+  now=$(sed -n 's/.*expected round \([0-9]*\) > \([0-9]*\) current round.*/\2/p' "$ERRFILE" | head -n 1)
+  [ -n "$need" ] && [ -n "$now" ] || return 0
+  [ "$need" -gt "$now" ]
+}
+
+last_error() { tail -n 1 "$ERRFILE" 2>/dev/null; }
+drand_error() { echo "Couldn't reach drand ($(last_error)). Check the internet connection."; }
+
+take_lock() {
+  # A lock left behind by a crash.
+  if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null
+  fi
+  mkdir "$LOCK" 2>/dev/null || return 1
+  LOCKED=1
+  trap cleanup EXIT   # a ( subshell ) starts without the trap
+  return 0
+}
+
+# Whether the key is open right now, asked of drand: the key opens, and the
+# end of its window hasn't come. With "unseal", an open key's secret goes into
+# SECRET. Returns
+#   0  open
+#   1  sealed
+#   2  drand out of reach
+#   3  the window is over, but the key couldn't be sealed again yet
+#   4  the key's files aren't in order
+# There's no code in 3 and 4: when sealing the key again fails, for example
+# on a full disk, codes stop anyway.
+key_state() {
+  local r w ok=1
+  SECRET=""
+  r=$(round_of "$KEY")
+  w=$(get WINDOW)
+  is_number "$r" && is_number "$w" && is_number "$(get OPEN_AT)" && is_number "$(get EVERY)" || return 4
+  [ "$(round_of "$END")" = "$((r + w / PERIOD))" ] || return 4
+  if [ "${1:-}" = unseal ]; then
+    SECRET=$(unseal "$KEY") && ok=0
+  else
+    opens "$KEY" && ok=0
+  fi
+  if [ "$ok" -ne 0 ]; then
+    SECRET=""
+    if still_sealed; then return 1; fi
+    return 2
+  fi
+  if opens "$END"; then
+    SECRET=""
+    return 3
+  fi
+  still_sealed && return 0
+  SECRET=""
+  return 2
+}
+
+# Seals SECRET to the next opening and the end marker to the end of that
+# window, then puts both in place. Inputs: OPEN_AT_WANTED (a first date, or
+# empty to keep the cycle), OLD_ROUND, OLD_AT, EVERY_S, WINDOW_S.
+do_seal() {
+  rm -f "$KEY.new" "$END.new" "$STATE.new"
+  seal_files && return 0
+  rm -f "$KEY.new" "$END.new" "$STATE.new"   # tle leaves an empty file behind when it fails
+  return 1
+}
+
+seal_files() {
+  local k=0 now
+  if [ -n "$OPEN_AT_WANTED" ]; then
+    now=$(date +%s)
+    if [ "$OPEN_AT_WANTED" -le "$now" ]; then
+      echo "that date has already passed" > "$ERRFILE"
+      return 1
+    fi
+    printf '%s' "$SECRET" | tle -e -D "$((OPEN_AT_WANTED - now))s" -o "$KEY.new" 2>"$ERRFILE" || return 1
+    NEW_ROUND=$(round_of "$KEY.new")
+    if [ -z "$NEW_ROUND" ]; then
+      echo "couldn't read the round from the sealed file" > "$ERRFILE"
+      return 1
+    fi
+    NEW_AT=$OPEN_AT_WANTED
+  else
+    # Same cycle: the first opening, from the current key's on, that hasn't passed.
+    while :; do
+      NEW_ROUND=$((OLD_ROUND + k * EVERY_S / PERIOD))
+      rm -f "$KEY.new"
+      printf '%s' "$SECRET" | tle -e -f -r "$NEW_ROUND" -o "$KEY.new" 2>"$ERRFILE" || return 1
+      opens "$KEY.new" || break
+      k=$((k + 1))
+      if [ "$k" -gt 1000 ]; then
+        echo "couldn't find an opening date in the future" > "$ERRFILE"
+        return 1
+      fi
+    done
+    NEW_AT=$((OLD_AT + k * EVERY_S))
+  fi
+  printf 'window end' | tle -e -f -r "$((NEW_ROUND + WINDOW_S / PERIOD))" -o "$END.new" 2>"$ERRFILE" || return 1
+  # The new key must not open yet: one that opens now would be no lock at all.
+  if opens "$KEY.new"; then
+    echo "the new key opened straight away. Is this Mac's date and time right?" > "$ERRFILE"
+    return 1
+  fi
+  still_sealed || return 1
+  if ! write_state "$NEW_AT" "$EVERY_S" "$WINDOW_S" || ! commit; then
+    echo "couldn't save the new key. Is the disk full?" > "$ERRFILE"
+    return 1
+  fi
+  # An old copy opens once its date has passed, so keep the folder out of backups.
+  command -v tmutil >/dev/null 2>&1 && tmutil addexclusion "$DATA" >/dev/null 2>&1
+  return 0
+}
+
+# Every 15 minutes, and before every answer: once the end marker opens, the
+# window is over, and the same secret is sealed again until the next opening.
+cmd_relock() {
+  local r e w every at secret k nr
+  [ -f "$KEY" ] || return 0
+  take_lock || return 0
+  r=$(round_of "$KEY")
+  w=$(get WINDOW)
+  every=$(get EVERY)
+  at=$(get OPEN_AT)
+  if ! is_number "$r" || ! is_number "$w" || ! is_number "$every" || ! is_number "$at"; then
+    log "can't read the key's round or the schedule"
+    return 1
+  fi
+  e=$((r + w / PERIOD))
+  # The end marker holds no secret, so it can be made again whenever it doesn't
+  # match the key, for example after a new key that was cut short.
+  if [ "$(round_of "$END")" != "$e" ]; then
+    rm -f "$END.new"
+    if printf 'window end' | tle -e -f -r "$e" -o "$END.new" 2>"$ERRFILE"; then
+      mv -f "$END.new" "$END"
+    else
+      log "couldn't seal the end marker: $(last_error)"
+      return 1
+    fi
+  fi
+
+  opens "$END" || return 0   # the window isn't over (or drand is out of reach)
+
+  secret=$(unseal "$KEY") || { log "the window is over but the key didn't open: $(last_error)"; return 1; }
+  k=1
+  while :; do
+    nr=$((r + k * every / PERIOD))
+    rm -f "$KEY.new" "$END.new"
+    printf '%s' "$secret" | tle -e -f -r "$nr" -o "$KEY.new" 2>"$ERRFILE" \
+      || { log "sealing failed: $(last_error)"; rm -f "$KEY.new"; return 1; }
+    printf 'window end' | tle -e -f -r "$((nr + w / PERIOD))" -o "$END.new" 2>"$ERRFILE" \
+      || { log "sealing the end marker failed: $(last_error)"; rm -f "$KEY.new" "$END.new"; return 1; }
+    opens "$END.new" || break
+    k=$((k + 1))
+    if [ "$k" -gt 1000 ]; then
+      log "couldn't find an opening date in the future"
+      rm -f "$KEY.new" "$END.new"
+      return 1
+    fi
+  done
+  secret=""
+  # The end marker didn't open. Make sure that's because its round is ahead,
+  # not because drand was out of reach.
+  if ! still_sealed; then
+    log "couldn't check the new date with drand: $(last_error)"
+    rm -f "$KEY.new" "$END.new"
+    return 1
+  fi
+  at=$((at + k * every))
+  if ! write_state "$at" "$every" "$w" || ! commit; then
+    log "couldn't save the key, sealed again. Is the disk full?"
+    rm -f "$KEY.new" "$END.new" "$STATE.new"
+    return 1
+  fi
+  log "sealed again until $(show_date "$at")"
+}
+
+# --- Root side: answering your account ------------------------------------
+#
+# One request per connection, one line back:
+#   status        none | open CLOSE_AT EVERY WINDOW | sealed OPEN_AT EVERY WINDOW
+#   code          none | code CODE SECONDS_LEFT CLOSE_AT | sealed OPEN_AT
+#   begin         ok | none | sealed OPEN_AT   (a new key is about to be set up)
+#   seal SECRET OPEN_AT|- EVERY WINDOW
+#                 sealed OPEN_AT | none | refused sealed OPEN_AT | refused date
+# and "error MESSAGE" when something went wrong. Nothing else is accepted, and
+# nothing sealed ever leaves this side: only codes, and only while the key opens.
+
+reply() { printf '%s\n' "$*"; }
+
+cmd_serve() {
+  local line=""
+  exec 2>/dev/null
+  root_setup || { reply "error The key service isn't set up right. Run install.sh again."; return; }
+  IFS= read -r -t 10 line
+  [ -n "$line" ] || return 0
+  set -f
+  set -- $(printf '%s' "$line" | tr -d '\r')
+  set +f
+  case "${1:-}" in
+    status) serve_status ;;
+    code) serve_code ;;
+    begin) serve_begin ;;
+    seal) shift; serve_seal ${1+"$@"} ;;
+    *) reply "error unknown request" ;;
+  esac
+}
+
+state_error() {  # the answer for key_state's 2, 3 and 4
+  case "$1" in
+    2) reply "error $(drand_error)" ;;
+    3) reply "error The window is over, but sealing the key again didn't work yet. It's tried again every 15 minutes, and $LOGFILE says why." ;;
+    *) reply "error The key's files aren't in order. It's tried again every 15 minutes, and $LOGFILE says why." ;;
+  esac
+}
+
+serve_status() {
+  local st
+  [ -f "$KEY" ] || { reply none; return; }
+  ( cmd_relock ) >/dev/null 2>&1
+  key_state; st=$?
+  case $st in
+    0) reply "open $(( $(get OPEN_AT) + $(get WINDOW) )) $(get EVERY) $(get WINDOW)" ;;
+    1) reply "sealed $(get OPEN_AT) $(get EVERY) $(get WINDOW)" ;;
+    *) state_error $st ;;
+  esac
+}
+
+serve_code() {
+  local st now code
+  [ -f "$KEY" ] || { reply none; return; }
+  ( cmd_relock ) >/dev/null 2>&1
+  key_state unseal; st=$?
+  case $st in
+    0)
+      now=$(date +%s)
+      code=$(totp "$SECRET" "$now") || code=""
+      SECRET=""
+      if [ -n "$code" ]; then
+        reply "code $code $((60 - now % 30)) $(( $(get OPEN_AT) + $(get WINDOW) ))"
+      else
+        reply "error Couldn't make a code."
+      fi ;;
+    1) reply "sealed $(get OPEN_AT)" ;;
+    *) state_error $st ;;
+  esac
+}
+
+# A new key is about to be set up, while the key is open. If the window ends
+# before it's sealed, the new key may still be sealed for HOLD_FOR seconds:
+# by then OwnDroid uses it, not the old one. This doesn't keep anything open.
+serve_begin() {
+  local st
+  [ -f "$KEY" ] || { reply none; return; }
+  ( cmd_relock ) >/dev/null 2>&1
+  key_state; st=$?
+  case $st in
+    0)
+      if date +%s > "$HOLD"; then reply ok; else reply "error Couldn't write to $DATA. Is the disk full?"; fi ;;
+    1) reply "sealed $(get OPEN_AT)" ;;
+    *) state_error $st ;;
+  esac
+}
+
+serve_seal() {  # secret, first date (or -), every, window
+  local secret=${1:-} open=${2:-} every=${3:-} window=${4:-} now held="" st e
+  case "$secret" in ''|*[!A-Z2-7]*) reply "error That isn't a key."; return ;; esac
+  if [ "${#secret}" -lt 16 ] || [ "${#secret}" -gt 128 ]; then
+    reply "error That isn't a key."
+    return
+  fi
+  if ! is_number "$every" || ! is_number "$window" || [ "$window" -lt 3600 ] \
+     || [ $((window % 3600)) -ne 0 ] || [ $((every % 3600)) -ne 0 ] \
+     || [ "$every" -le "$window" ] || [ "$every" -gt 31622400 ]; then
+    reply "error That schedule doesn't work."
+    return
+  fi
+  [ "$open" = - ] || is_number "$open" || { reply "error That date doesn't work."; return; }
+  ( cmd_relock ) >/dev/null 2>&1   # a window that's over is closed first
+  take_lock || { reply "error Busy. Try again in a minute."; return; }
+  now=$(date +%s)
+  OLD_ROUND="" OLD_AT=""
+  if [ -f "$KEY" ]; then
+    if [ -f "$HOLD" ] && is_number "$(cat "$HOLD")" && [ $(( $(cat "$HOLD") + HOLD_FOR )) -gt "$now" ]; then
+      held=1
+    fi
+    key_state; st=$?
+    case $st in
+      0) ;;
+      2) reply "error $(drand_error)"; return ;;
+      *)
+        # Not open, and no new key was started while it was: OwnDroid still
+        # uses this one, so replacing it would lock OwnDroid for good.
+        [ -n "$held" ] || { reply "refused sealed $(get OPEN_AT)"; return; } ;;
+    esac
+    OLD_ROUND=$(round_of "$KEY")
+    OLD_AT=$(get OPEN_AT)
+    if ! is_number "$OLD_ROUND" || ! is_number "$OLD_AT"; then
+      reply "error Can't read the current key's schedule."
+      return
+    fi
+  elif [ "$open" = - ]; then
+    reply none
+    return
+  fi
+  if [ "$open" = - ]; then
+    OPEN_AT_WANTED=""
+  else
+    [ "$open" -gt $((now + 60)) ] || { reply "refused date"; return; }
+    OPEN_AT_WANTED=$open
+  fi
+  EVERY_S=$every WINDOW_S=$window SECRET=$secret
+  secret=""
+  if do_seal; then
+    rm -f "$HOLD"
+    log "sealed a new key until $(show_date "$NEW_AT")"
+    reply "sealed $NEW_AT"
+  else
+    e=$(last_error)
+    reply "error ${e:-Sealing failed. Is the disk full?}"
+  fi
+  SECRET=""
+}
+
+# --- Your side --------------------------------------------------------------
+
+# Sends one request to the root service and prints its one-line answer.
+talk() {
+  local answer
+  if [ -n "${OWNDROID_KEY_DIRECT:-}" ]; then
+    # For the tests: run the root side directly instead of through launchd.
+    answer=$(printf '%s\n' "$1" | bash "$OWNDROID_KEY_DIRECT" serve 2>/dev/null)
+  elif [ -S "$SOCK" ]; then
+    answer=$(printf '%s\n' "$1" | nc -w 60 -U "$SOCK" 2>/dev/null)
+  else
+    echo "error The key service isn't running. An administrator sets it up with: sudo bash install.sh"
+    return
+  fi
+  answer=$(printf '%s\n' "$answer" | head -n 1)
+  [ -n "$answer" ] || answer="error The key service didn't answer. Try again in a minute."
+  printf '%s\n' "$answer"
+}
+
+admin_note() {
+  if id -Gn 2>/dev/null | tr ' ' '\n' | grep -qx admin; then
+    say ""
+    say "Note: your account is an administrator on this Mac. With sudo it can still copy"
+    say "the sealed key, so the key is only out of reach from a Standard account."
+  fi
+}
+
+ask() {  # 0 = yes, 1 = no, 2 = just Enter, 3 = no keyboard left (Ctrl-D)
+  local ans
+  printf '   %s ' "$1" >&2
+  if ! IFS= read -r ans; then
+    say ""
+    return 3
+  fi
+  case "$ans" in
+    y|Y|yes|Yes|YES) return 0 ;;
+    n|N|no|No|NO) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+read_secret() {
+  local a b
+  while :; do
+    say "   Type the secret shown under the QR code, then press Enter."
+    say "   Spaces don't matter, and nothing shows while you type."
+    printf '   Secret: ' >&2
+    IFS= read -rs a || die "No secret typed."
+    say ""
+    printf '   Once more: ' >&2
+    IFS= read -rs b || die "No secret typed."
+    say ""
+    a=$(printf '%s' "$a" | tr -d ' \t-' | tr 'abcdefghijklmnopqrstuvwxyz' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    b=$(printf '%s' "$b" | tr -d ' \t-' | tr 'abcdefghijklmnopqrstuvwxyz' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    if [ "$a" != "$b" ]; then
+      say "   The two didn't match. Once more, please."
+      continue
+    fi
+    case "$a" in
+      ''|*[!A-Z2-7]*)
+        say "   A key only has the letters A to Z and the digits 2 to 7. A 0, 1 or 8 is"
+        say "   the letter O, I or B. Once more, please."
+        continue ;;
+    esac
+    if [ ${#a} -lt 16 ] || [ ${#a} -gt 128 ]; then
+      say "   That's too short or too long for a key. Once more, please."
+      continue
+    fi
+    if [ ${#a} -ne 32 ]; then
+      say "   OwnDroid's keys are 32 characters long, and this one has ${#a}."
+      ask "Use it anyway? [y/N]"
+      [ $? -eq 0 ] || continue
+    fi
+    SECRET=$a
+    return 0
+  done
+}
+
+code_line() { say "   Code: $1   (works for about $2 more seconds)"; }
+
+# A code from the secret just typed, for the checks while setting it up.
+local_code() {
+  local now code
+  now=$(date +%s)
+  code=$(totp "$SECRET" "$now") || die "Couldn't make a code. Is $OPENSSL there?"
+  code_line "$code" $((60 - now % 30))
+}
+
+cmd_seal() {
+  local open="" every="" window="" rekey=0 now answer a known_every="" known_window=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --open) open=${2:-}; shift ;;
+      --every) every=${2:-}; shift ;;
+      --window) window=${2:-}; shift ;;
+      *) die "Unknown option: $1 (see $PROG help)" ;;
+    esac
+    shift
+  done
+
+  a=$(talk status)
+  set -f; set -- $a; set +f
+  case "${1:-}" in
+    none) ;;
+    open) rekey=1 known_every=${3:-} known_window=${4:-} ;;
+    sealed) die "The key is sealed until $(show_date "$2"). A new key can only be set up while the current one is open, because OwnDroid only opens with the current one." ;;
+    *) die "${a#error }" ;;
+  esac
+
+  now=$(date +%s)
+  if [ -n "$every" ]; then
+    EVERY_S=$(to_seconds "$every") || die "--every takes days or weeks, like 30d or 4w."
+  elif [ "$rekey" = 1 ] && is_number "$known_every"; then
+    EVERY_S=$known_every
+  else
+    die "Say how often the key opens, like: --every 30d"
+  fi
+  if [ -n "$window" ]; then
+    WINDOW_S=$(to_seconds "$window") || die "--window takes hours, like 24h."
+  elif [ "$rekey" = 1 ] && is_number "$known_window"; then
+    WINDOW_S=$known_window
+  else
+    WINDOW_S=86400
+  fi
+  [ "$WINDOW_S" -ge 3600 ] || die "The window has to be at least an hour."
+  [ "$EVERY_S" -gt "$WINDOW_S" ] || die "--every has to be longer than the window ($(in_hours "$WINDOW_S"))."
+  [ "$EVERY_S" -le 31622400 ] || die "--every can be a year at most."
+  if [ -n "$open" ]; then
+    OPEN_AT_WANTED=$(to_epoch "$open") || die "Write the date like this: --open \"2026-12-01 18:00\""
+    [ "$OPEN_AT_WANTED" -gt $((now + 600)) ] || die "The date has to be at least 10 minutes from now."
+    [ "$OPEN_AT_WANTED" -le $((now + 31622400)) ] || die "The first date has to be within a year from now."
+  elif [ "$rekey" = 1 ]; then
+    OPEN_AT_WANTED=""
+  else
+    die "Say when the key first opens, like: --open \"2026-12-01 18:00\""
+  fi
+
+  # A typo in the date would lock OwnDroid for longer than meant, so say it back first.
+  if [ -n "$OPEN_AT_WANTED" ]; then
+    say ""
+    say "The key will open on $(show_date "$OPEN_AT_WANTED"), for $(in_hours "$WINDOW_S"),"
+    say "and then once every $(in_days "$EVERY_S"). Until then nobody can open OwnDroid, you included."
+    ask "Is that right? [y/n]" || exit 1
+  fi
+
+  say ""
+  if [ "$rekey" = 1 ]; then
+    a=$(talk begin)
+    case "$a" in
+      ok) ;;
+      sealed*) die "The key closed just now, so no new key can be set up until it opens again." ;;
+      *) die "${a#error }" ;;
+    esac
+    say "1. Open OwnDroid with the current key:"
+    while :; do
+      a=$(talk code)
+      set -f; set -- $a; set +f
+      [ "${1:-}" = code ] || die "Couldn't get a code: ${a#error }"
+      code_line "$2" "$3"
+      ask "In OwnDroid? [y, or Enter for a fresh code]"
+      case $? in 0) break ;; 1|3) exit 1 ;; esac
+    done
+    say "   Then go to Settings → App lock → Remove TOTP, and confirm. Then tap Set up TOTP."
+  else
+    say "1. In OwnDroid: Settings → App lock. If there's a Remove TOTP button, tap it and"
+    say "   confirm. Then tap Set up TOTP."
+  fi
+  read_secret
+
+  while :; do
+    say ""
+    say "2. On the phone, close the QR code. Still in App lock, set:"
+    say "     Password and Confirm password: test   (only until the check is done)"
+    say "     Allow unlock by biometric: off"
+    say "     Lock when leaving: on"
+    say "     Allow TOTP code unlock: on"
+    say "   and tap Set (or Update)."
+    say ""
+    say "3. Leave OwnDroid and open it again. It asks for a code: type this one"
+    say "   in the TOTP box, not the password box."
+    while :; do
+      local_code
+      ask "Did it ask for a code and open with this one? [y/n, or Enter for a fresh code]"
+      answer=$?
+      [ "$answer" -eq 2 ] || break
+    done
+    [ "$answer" -eq 0 ] && break
+    say ""
+    say "   If OwnDroid opened without asking for a code, the app lock isn't on yet:"
+    say "   press Enter to go back to step 2."
+    say "   If it asked but turned down a fresh code too, the secret was typed wrong:"
+    say "   type n to stop. Then open OwnDroid with the password test, go to"
+    say "   Settings → App lock → Remove TOTP, and run $PROG seal again."
+    ask "Enter for step 2, or n to stop."
+    case $? in 1|3) exit 1 ;; esac
+  done
+
+  say ""
+  say "   Sealing the key..."
+  while :; do
+    a=$(talk "seal $SECRET ${OPEN_AT_WANTED:--} $EVERY_S $WINDOW_S")
+    set -f; set -- $a; set +f
+    case "${1:-} ${2:-}" in
+      "sealed "*)
+        NEW_AT=$2
+        break ;;
+      "refused date")
+        say "   The date you picked is less than a minute away now. Run $PROG seal again"
+        say "   with a later date. Until then OwnDroid still opens with the password test."
+        exit 1 ;;
+      "none ")
+        say "   The old key is gone from this Mac. Run $PROG seal --open ... again."
+        say "   Until then OwnDroid still opens with the password test."
+        exit 1 ;;
+      "refused sealed")
+        say "   The old key was sealed again before the new one could be. OwnDroid now"
+        say "   uses the new key, and still opens with the password test. To start over, an"
+        say "   administrator clears the old key with:"
+        say "     sudo rm -rf \"$DATA\""
+        say "   and then you run $PROG seal --open ... again."
+        exit 1 ;;
+    esac
+    say "   Sealing didn't work: ${a#error }"
+    say "   OwnDroid still opens with the password test."
+    ask "Press Enter to try again, or n to stop."
+    case $? in 1|3) exit 1 ;; esac
+  done
+  say "   Sealed. The key opens on $(show_date "$NEW_AT"), for $(in_hours "$WINDOW_S"),"
+  say "   and then once every $(in_days "$EVERY_S"). Until step 4 is done, the password"
+  say "   test still opens OwnDroid, so don't stop here."
+
+  say ""
+  say "4. Remove the test password. In OwnDroid: Settings → App lock → Disable, and confirm."
+  say "   Open App lock again: turn Allow TOTP code unlock on, keep Lock when leaving on"
+  say "   and biometric unlock off, leave both password fields empty, and tap Set."
+  say ""
+  say "5. Leave OwnDroid and open it once more. It should ask for a code only, with"
+  say "   no password box. Type this code:"
+  while :; do
+    local_code
+    ask "Did it open with this code? [y, or Enter for a fresh code]"
+    case $? in
+      0) break ;;
+      1) say "   If it opened without asking, Allow TOTP code unlock is off: repeat step 4."
+         say "   If it still shows a password box, the test password is still set: repeat step 4."
+         say "   If it turned the code down, try a fresh one: codes change every 30 seconds." ;;
+      3) say "   Stopped before the last check. Leave OwnDroid and open it again: if it opens"
+         say "   without a code, or still has a password box, repeat step 4."
+         exit 1 ;;
+    esac
+  done
+  SECRET=""
+  say ""
+  say "Done. Nothing on this Mac can show the key before $(show_date "$NEW_AT")."
+  say "Put that date in your calendar."
+}
+
+cmd_code() {
+  local a
+  a=$(talk code)
+  set -f; set -- $a; set +f
+  case "${1:-}" in
+    code)
+      say "The key is open until $(show_date "$4")."
+      code_line "$2" "$3" ;;
+    sealed)
+      say "The key is sealed until $(show_date "$2")."
+      exit 1 ;;
+    none) die "There's no key yet. Start with: $PROG seal --open \"YYYY-MM-DD HH:MM\" --every 30d" ;;
+    *) die "${a#error }" ;;
+  esac
+}
+
+cmd_status() {
+  local a
+  a=$(talk status)
+  set -f; set -- $a; set +f
+  case "${1:-}" in
+    none) say "There's no key yet. Start with: $PROG seal --open \"YYYY-MM-DD HH:MM\" --every 30d" ;;
+    open|sealed)
+      say "The key is $1 until $(show_date "$2")."
+      say "It opens for $(in_hours "$4") once every $(in_days "$3")." ;;
+    *) die "${a#error }" ;;
+  esac
+  admin_note
+}
+
+case "${1:-help}" in
+  seal) shift; cmd_seal ${1+"$@"} ;;
+  code) cmd_code ;;
+  status) cmd_status ;;
+  relock)
+    root_setup || { log "can't use $DATA, or tle is missing from $ROOT/bin"; exit 1; }
+    cmd_relock ;;
+  serve) cmd_serve ;;
+  _totp) totp "${2:-}" "${3:-}" ;;   # for the tests
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The socket your account asks for codes on. launchd listens, and runs
+     "owndroid-key serve" as root for each request, with the connection as its
+     input and output. Mode 438 is 0666: any account on this Mac may ask.
+     install.sh copies this to /Library/LaunchDaemons. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.zinzuzu.owndroid-key.service</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Library/Application Support/OwnDroidKey/owndroid-key</string>
+		<string>serve</string>
+	</array>
+	<key>Sockets</key>
+	<dict>
+		<key>Listener</key>
+		<dict>
+			<key>SockPathName</key>
+			<string>/var/run/io.github.zinzuzu.owndroid-key.sock</string>
+			<key>SockPathMode</key>
+			<integer>438</integer>
+		</dict>
+	</dict>
+	<key>inetdCompatibility</key>
+	<dict>
+		<key>Wait</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
