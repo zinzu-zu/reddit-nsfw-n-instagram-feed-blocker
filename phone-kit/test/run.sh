@@ -45,9 +45,28 @@ case "$url" in
 JSON
     ;;
   "$base/OwnDroid-v8.4.apk") printf 'package=com.bintianqi.owndroid\nversion=8.4\ncode=40\nflags=launcher\n' > "$out" ;;
+  https://dl.google.com/android/repository/platform-tools-latest-darwin.zip)
+    # Android's platform tools: an adb that is the pretend phone's.
+    python3 - "$out" <<'PY'
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1], "w")
+i = zipfile.ZipInfo("platform-tools/adb")
+i.external_attr = 0o755 << 16
+z.writestr(i, '#!/bin/bash\nexec "$FAKE_ADB" "$@"\n')
+z.close()
+PY
+    ;;
   *) exit 22 ;;
 esac
 EOF
+
+# macOS's open: TextEdit, where the person fills in the settings file.
+cat > "$BIN/open" <<'EOF'
+#!/bin/bash
+echo "$*" >> "$FAKE_LOG/open"
+[ "$1" != -e ] || [ -z "${FAKE_TEXTEDIT:-}" ] || printf '%s\n' "$FAKE_TEXTEDIT" > "$2"
+EOF
+export FAKE_ADB="$T/fake-adb"
 
 # owndroid-key: FAKE_KEY is none (no key yet), sealed, or broken.
 mkdir -p "$WORK/keybin"
@@ -61,7 +80,7 @@ case "$1" in
       sealed) echo "The key is sealed until Tue 1 Dec 2026 18:00."; echo "It opens for 24 hours once every 30 days." ;;
       broken) echo "owndroid-key: Can't reach the key service. Run sudo bash install.sh again." >&2; exit 1 ;;
     esac ;;
-  seal) echo "owndroid-key: sealing ($*)" ;;
+  seal) echo "owndroid-key: sealing ($*)"; [ -z "${FAKE_SEAL_FAILS:-}" ] || exit 1 ;;
 esac
 EOF
 chmod +x "$BIN"/* "$WORK/keybin/owndroid-key"
@@ -320,6 +339,8 @@ check "the leftover in the package report's later parts wasn't touched" not said
 check "the audit had no ✗" not_said "✗"
 check "nothing to check by hand on Android 16" not_said "check it in OwnDroid"
 check "owndroid-key made a key for a new phone" grep -qx "seal --new-phone" "$FAKE_LOG/owndroid-key"
+check "and the kit ends after it" said "The phone is set up."
+check "the whole setup: exit 0" rc_is 0
 check "after checking its status" grep -qx "status" "$FAKE_LOG/owndroid-key"
 check "the API key was typed into the field" is "$(wc -c < "$P/od/field")" 24
 
@@ -640,8 +661,15 @@ echo "--- OwnDroid's code ---"
 fresh 36
 FAKE_KEY=none setup
 check "no key yet: how to make the first one" said 'owndroid-key seal --open "YYYY-MM-DD HH:MM" --every 30d'
-check "and it's done" said "The phone is set up."
+check "and it's done, apart from the code" said "The phone is set up, apart from OwnDroid's code."
+check "no key yet: exit 0" rc_is 0
 check "nothing sealed" not grep -q "^seal" "$FAKE_LOG/owndroid-key"
+fresh 36
+FAKE_SEAL_FAILS=1 setup
+check "owndroid-key fails: says the code isn't set" said "owndroid-key didn't finish, so OwnDroid has no code from this Mac yet."
+check "and what to run" said "Run it when you're ready: owndroid-key seal --new-phone"
+check "and the setup still ends" rc_is 0
+check "apart from the code" said "The phone is set up, apart from OwnDroid's code."
 fresh 36
 FAKE_KEY=broken setup
 check "owndroid-key broken: its message" said "Can't reach the key service"
@@ -654,6 +682,74 @@ fresh 36
 setup 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\nn\n'
 check "no to the new key: says when to" said "Run it when you're ready: owndroid-key seal --new-phone"
 check "nothing sealed (2)" not grep -q "^seal" "$FAKE_LOG/owndroid-key"
+
+echo "--- Set up a phone.command ---"
+
+# A copy of the kit, so the download lands in a scratch folder.
+COPY="$WORK/kitcopy"
+mkdir -p "$COPY"
+cp "$KIT" "$HERE/my-phone.conf.example" "$HERE/Set up a phone.command" "$COPY/"
+CLICK="$COPY/Set up a phone.command"
+click() {  # the answers typed, as for kit()
+  # shellcheck disable=SC2059
+  printf "$1" | $TIMEOUT "$CLICK" > "$OUT" 2>&1
+  RC=$?
+}
+export FAKE_TEXTEDIT="$BASE_CONF"
+
+fresh 36
+rm -f "$PHONE_KIT_CONF"
+click "\n$Y40"
+check "click: makes the settings file" test -f "$PHONE_KIT_CONF"
+check "click: opens it in TextEdit" grep -qxF -- "-e $PHONE_KIT_CONF" "$FAKE_LOG/open"
+check "click: then the whole setup" said "15/15  OwnDroid's code"
+check "click: done" said "The phone is set up."
+check "click: the window waits before closing" said "Press Enter to close this window."
+check "click: exit 0" rc_is 0
+check "click: nothing downloaded" not grep -qs dl.google.com "$FAKE_LOG/curl"
+
+fresh 36
+conf "NEXTDNS_HOST=abc123.dns.nextdns.io"
+click "s\n\n$Y40"
+check "click, example settings: the kit says so" said "NEXTDNS_HOST is still the example"
+check "click: s opens the settings" grep -qxF -- "-e $PHONE_KIT_CONF" "$FAKE_LOG/open"
+check "click: then Enter goes on and finishes" said "The phone is set up."
+check "click, after the fix: exit 0" rc_is 0
+
+fresh 36
+touch "$P/taps/unplug-at-api-field"
+click "\n$Y40$Y40"
+check "click, cable out: Enter to go on" said "Plug it in again and unlock it, then press Enter in this window:"
+check "click, cable out: no command to type" not_said "run phone-kit setup again"
+check "click, cable out: goes on and finishes" said "The phone is set up."
+
+fresh 36
+printf 'y\ny\ny\n' | PHONE_KIT_AGAIN="press Enter in this window" $TIMEOUT "$KIT" setup > "$OUT" 2>&1
+check "stopped from the window: Enter, not a command" said "Stopped. Press Enter in this window to go on where it stopped."
+
+fresh 36
+( unset PHONE_KIT_ADB
+  printf "y\n$Y40" | PATH="$BIN:$WORK/keybin:/usr/bin:/bin" PHONE_KIT_ADB_PLACES="" $TIMEOUT "$CLICK" > "$OUT" 2>&1 )
+RC=$?
+check "no adb: offers to get it" said "This Mac doesn't have adb"
+check "no adb: downloads Android's platform tools" grep -qx "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip" "$FAKE_LOG/curl"
+check "no adb: into the kit's folder" test -x "$COPY/platform-tools/adb"
+check "no adb: then sets the phone up with it" said "The phone is set up."
+check "no adb: exit 0" rc_is 0
+
+fresh 36
+( unset PHONE_KIT_ADB
+  printf "y\n$Y40" | PATH="$BIN:$WORK/keybin:/usr/bin:/bin" PHONE_KIT_ADB_PLACES="" $TIMEOUT "$CLICK" > "$OUT" 2>&1 )
+check "adb downloaded before: used again" not grep -qs dl.google.com "$FAKE_LOG/curl"
+rm -rf "$COPY/platform-tools"
+
+fresh 36
+( unset PHONE_KIT_ADB
+  printf 'n\n\n' | PATH="$BIN:$WORK/keybin:/usr/bin:/bin" PHONE_KIT_ADB_PLACES="" $TIMEOUT "$CLICK" > "$OUT" 2>&1 )
+RC=$?
+check "no adb, no download: says how to get it" said "brew install android-platform-tools"
+check "no adb, no download: exit 1" rc_is 1
+check "no adb, no download: the phone untouched" not has owner
 
 echo
 echo "$passed passed, $failed failed"
