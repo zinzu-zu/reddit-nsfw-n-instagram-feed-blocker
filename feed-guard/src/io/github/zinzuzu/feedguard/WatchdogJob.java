@@ -8,13 +8,29 @@ import android.content.ComponentName;
 import android.content.Context;
 
 /**
- * Safety net, every 15 minutes and after a restart. If Feed Guard's access was
- * switched off in a way that skipped the dead-man switch (for example while its
- * process wasn't running), this pauses Firefox. It also catches apps installed
- * while Feed Guard wasn't running.
+ * Safety net, every 15 minutes, after a restart, and a few seconds after the
+ * accessibility access goes off. It switches the access back on when it can,
+ * pauses Firefox when it can't, keeps the screen black and white while the
+ * service isn't running, and catches apps installed while it wasn't running.
  */
 public final class WatchdogJob extends JobService {
     private static final int JOB_ID = 4711;
+    private static final int JOB_ID_SOON = 4712;
+
+    /** One extra check in a few seconds, after the accessibility access went off. */
+    static void checkSoon(Context c) {
+        JobScheduler js = c.getSystemService(JobScheduler.class);
+        if (js == null) return;
+        JobInfo job = new JobInfo.Builder(JOB_ID_SOON, new ComponentName(c, WatchdogJob.class))
+                .setMinimumLatency(5_000)
+                .setOverrideDeadline(30_000)
+                .build();
+        try {
+            js.schedule(job);
+        } catch (RuntimeException ignored) {
+            // Not allowed: the 15-minute check still runs.
+        }
+    }
 
     static void schedule(Context c) {
         JobScheduler js = c.getSystemService(JobScheduler.class);

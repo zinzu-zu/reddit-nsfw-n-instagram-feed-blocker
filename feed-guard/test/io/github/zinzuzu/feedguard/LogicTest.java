@@ -1,14 +1,20 @@
 package io.github.zinzuzu.feedguard;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
 /**
  * Tests for the parts of Feed Guard that don't need a phone: reading the
- * address bar, the add-on's marker, the cover decision and the app rules.
+ * address bar, the add-on's marker, the cover decision, the app rules (with
+ * "Only apps on the list"), when colour is allowed, the accessibility
+ * services list and signature pins.
  * Run with test/run.sh. No test framework, so it runs on a plain JDK.
  */
 public final class LogicTest {
@@ -19,6 +25,10 @@ public final class LogicTest {
         markerText();
         coverDecision();
         appRules();
+        listRule();
+        colourRules();
+        serviceList();
+        pins();
         System.out.println(passed + " passed, " + failed + " failed");
         if (failed > 0) System.exit(1);
     }
@@ -208,6 +218,215 @@ public final class LogicTest {
         check("Threads is left alone", !AppRules.isFeedApp("com.instagram.barcelona"));
         eq("parse list", set("a.b", "c.d", "e.f", "g.h"), AppRules.parseList(" a.b, c.d;e.f  g.h "));
         eq("parse empty", Collections.<String>emptySet(), AppRules.parseList("  "));
+    }
+
+    // --- Only apps on the list ---------------------------------------------
+
+    static final String SELF = "io.github.zinzuzu.feedguard";
+
+    /** A phone like the user's Pixel: what's installed, what came with it, what's in the app drawer. */
+    static AppRules.Inputs phone() {
+        AppRules.Inputs in = new AppRules.Inputs();
+        in.installed = set("org.mozilla.firefox", "com.android.chrome", "org.mozilla.focus", "com.instagram.android",
+                "com.whatsapp", "org.telegram.messenger", "com.anthropic.claude", "com.google.android.apps.maps",
+                "com.google.android.youtube", "com.google.android.calculator", "com.android.vending",
+                "com.google.android.googlequicksearchbox", "com.android.settings", "com.bintianqi.owndroid",
+                "io.github.zinzuzu.watchlimit", SELF, "com.google.android.gms", "com.example.sharetarget",
+                "com.google.android.apps.nexuslauncher", "com.google.android.dialer", "com.google.android.apps.messaging",
+                "com.google.android.contacts", "com.google.android.deskclock", "com.google.android.inputmethod.latin",
+                "com.google.android.documentsui", "com.android.providers.media", "helium314.keyboard",
+                "com.google.android.apps.photos", "com.google.android.GoogleCamera");
+        // Came with the phone: everything except these.
+        in.userInstalled = set("org.mozilla.firefox", "org.mozilla.focus", "com.instagram.android", "com.whatsapp",
+                "org.telegram.messenger", "com.anthropic.claude", "com.bintianqi.owndroid", "io.github.zinzuzu.watchlimit",
+                SELF, "com.example.sharetarget", "helium314.keyboard");
+        in.launchable = set("org.mozilla.firefox", "com.android.chrome", "org.mozilla.focus", "com.instagram.android",
+                "com.whatsapp", "org.telegram.messenger", "com.anthropic.claude", "com.google.android.apps.maps",
+                "com.google.android.youtube", "com.google.android.calculator", "com.android.vending",
+                "com.google.android.googlequicksearchbox", "com.android.settings", "com.bintianqi.owndroid",
+                "io.github.zinzuzu.watchlimit", SELF, "com.google.android.dialer", "com.google.android.apps.messaging",
+                "com.google.android.contacts", "com.google.android.deskclock", "com.google.android.apps.photos",
+                "com.google.android.GoogleCamera", "helium314.keyboard");
+        in.browsers = set("org.mozilla.firefox", "com.android.chrome", "org.mozilla.focus");
+        // HeliBoard is the keyboard in use, so AppGate counts it as a basic.
+        in.essential = set(SELF, "helium314.keyboard");
+        return in;
+    }
+
+    static void listRule() {
+        AppRules.Inputs in = phone();
+        AppRules.Plan plan = AppRules.plan(in);
+        eq("list off: only the browser rule", set("com.android.chrome", "org.mozilla.focus", "com.instagram.android"),
+                new HashSet<>(plan.pause));
+        check("list off: nothing for the list rule", plan.listRule.isEmpty());
+
+        in.listMode = true;
+        in.allowed = set("com.whatsapp", "org.telegram.messenger", "com.anthropic.claude", "com.google.android.apps.maps",
+                "com.google.android.calculator");
+        plan = AppRules.plan(in);
+        eq("list on: everything else in the drawer, and what you installed",
+                set("org.mozilla.firefox", "com.android.chrome", "org.mozilla.focus", "com.instagram.android",
+                        "com.google.android.youtube", "com.android.vending", "com.google.android.googlequicksearchbox",
+                        "com.example.sharetarget", "com.google.android.apps.photos", "com.google.android.GoogleCamera"),
+                new HashSet<>(plan.pause));
+        check("list on: listed apps open", !plan.pause.contains("com.whatsapp") && !plan.pause.contains("com.google.android.apps.maps"));
+        check("list on: the basics stay", !plan.pause.contains("com.google.android.dialer")
+                && !plan.pause.contains("com.google.android.apps.messaging") && !plan.pause.contains("com.google.android.contacts")
+                && !plan.pause.contains("com.google.android.deskclock") && !plan.pause.contains("com.android.settings")
+                && !plan.pause.contains("com.google.android.documentsui"));
+        check("list on: the lock stays", !plan.pause.contains("com.bintianqi.owndroid")
+                && !plan.pause.contains("io.github.zinzuzu.watchlimit") && !plan.pause.contains(SELF));
+        check("list on: the keyboard in use stays", !plan.pause.contains("helium314.keyboard"));
+        check("list on: system parts without an icon stay", !plan.pause.contains("com.google.android.gms")
+                && !plan.pause.contains("com.android.providers.media"));
+        check("list on: Firefox is paused unless listed", plan.pause.contains("org.mozilla.firefox"));
+        check("list on: Play Store is paused unless listed", plan.listRule.contains("com.android.vending"));
+
+        in.allowed = set("com.whatsapp", "org.mozilla.firefox");
+        check("list on: listed Firefox opens", !AppRules.plan(in).pause.contains("org.mozilla.firefox"));
+
+        in.allowed = set("com.whatsapp", "com.bintianqi.owndroid");
+        in.extraBlocked = set("com.bintianqi.owndroid", "com.google.android.dialer");
+        plan = AppRules.plan(in);
+        check("basics can't be paused, even as extra apps", !plan.pause.contains("com.bintianqi.owndroid")
+                && !plan.pause.contains("com.google.android.dialer"));
+        in.extraBlocked = Collections.emptySet();
+
+        // The browser rule pauses once; the list rule keeps pausing.
+        in = phone();
+        in.handled = set("com.android.chrome");
+        check("list off: Chrome unpaused in OwnDroid stays unpaused", !AppRules.plan(in).pause.contains("com.android.chrome"));
+        in.listMode = true;
+        check("list on: Chrome is paused again", AppRules.plan(in).pause.contains("com.android.chrome"));
+
+        // Lifting Feed Guard's own pauses.
+        in = phone();
+        in.listMode = true;
+        in.allowed = set("com.whatsapp");
+        in.ours = set("com.whatsapp", "com.google.android.youtube", "com.android.chrome", "gone.app");
+        plan = AppRules.plan(in);
+        eq("list on: lifts only what's now listed", set("com.whatsapp"), new HashSet<>(plan.release));
+        in.listMode = false;
+        plan = AppRules.plan(in);
+        eq("list off: lifts list pauses, keeps the browser rule's", set("com.whatsapp", "com.google.android.youtube"),
+                new HashSet<>(plan.release));
+        check("never lifts an uninstalled app", !plan.release.contains("gone.app"));
+
+        in = phone();
+        in.ours = set("com.whatsapp");
+        in.extraBlocked = set("com.whatsapp");
+        check("extra app stays paused", AppRules.plan(in).release.isEmpty());
+        in.extraBlocked = Collections.emptySet();
+        check("extra app taken off: lifted", AppRules.plan(in).release.contains("com.whatsapp"));
+
+        // The dead-man switch holds Firefox: neither paused nor lifted by the rules.
+        in = phone();
+        in.listMode = true;
+        in.ours = set("org.mozilla.firefox");
+        in.allowed = set("org.mozilla.firefox");
+        in.skip = set("org.mozilla.firefox");
+        plan = AppRules.plan(in);
+        check("dead-man Firefox isn't lifted", !plan.release.contains("org.mozilla.firefox"));
+        in.allowed = Collections.emptySet();
+        check("dead-man Firefox isn't paused twice", !AppRules.plan(in).pause.contains("org.mozilla.firefox"));
+
+        // Signature pins take an app off the list (AppGate removes it from allowed).
+        in = phone();
+        in.listMode = true;
+        in.allowed = set("com.google.android.apps.maps");
+        check("a repackaged WhatsApp is paused", AppRules.plan(in).pause.contains("com.whatsapp"));
+    }
+
+    // --- Colour ------------------------------------------------------------
+
+    static final long SCREEN = 1080L * 2400;
+    static final long BAR = 1080L * 80;
+    static final Set<String> MAPS = ColorRules.DEFAULT_COLOUR_APPS;
+
+    static ColorRules.Win app(String pkg) {
+        return new ColorRules.Win(ColorRules.APP, pkg, SCREEN);
+    }
+
+    static ColorRules.Win win(int kind, long area) {
+        return new ColorRules.Win(kind, null, area);
+    }
+
+    static boolean colour(ColorRules.Win... windows) {
+        return ColorRules.colourAllowed(new ArrayList<>(Arrays.asList(windows)), SCREEN, MAPS);
+    }
+
+    static void colourRules() {
+        ColorRules.Win statusBar = win(ColorRules.SYSTEM, BAR);
+        ColorRules.Win navBar = win(ColorRules.SYSTEM, BAR);
+        check("Maps alone: colour", colour(app("com.google.android.apps.maps"), statusBar, navBar));
+        check("CoMaps alone: colour", colour(app("app.comaps.google"), statusBar));
+        check("Organic Maps alone: colour", colour(app("app.organicmaps")));
+        check("WhatsApp: black and white", !colour(app("com.whatsapp"), statusBar, navBar));
+        check("home screen with Maps in a corner: black and white",
+                !colour(new ColorRules.Win(ColorRules.APP, "com.google.android.apps.maps", SCREEN / 9),
+                        app("com.google.android.apps.nexuslauncher")));
+        check("Maps next to WhatsApp: black and white", !colour(app("com.google.android.apps.maps"), app("com.whatsapp")));
+        check("Maps next to CoMaps: colour", colour(app("com.google.android.apps.maps"), app("app.comaps.fdroid")));
+        check("keyboard over Maps: black and white",
+                !colour(app("com.google.android.apps.maps"), win(ColorRules.KEYBOARD, SCREEN / 3)));
+        check("shade over Maps: black and white", !colour(app("com.google.android.apps.maps"), win(ColorRules.SYSTEM, SCREEN)));
+        check("half-screen overlay: black and white",
+                !colour(app("com.google.android.apps.maps"), win(ColorRules.SYSTEM, SCREEN / 2)));
+        check("small chat bubble: still colour",
+                colour(app("com.google.android.apps.maps"), win(ColorRules.SYSTEM, 200L * 200)));
+        check("Feed Guard's cover ignored", colour(app("com.google.android.apps.maps"), win(ColorRules.IGNORED, SCREEN)));
+        check("lock screen: black and white", !colour(win(ColorRules.SYSTEM, SCREEN)));
+        check("app unreadable: black and white", !colour(new ColorRules.Win(ColorRules.APP, null, SCREEN)));
+        check("nothing on screen: black and white", !colour());
+        check("windows unreadable: black and white", !ColorRules.colourAllowed(null, SCREEN, MAPS));
+        check("no colour apps: black and white",
+                !ColorRules.colourAllowed(Collections.singletonList(app("com.google.android.apps.maps")), SCREEN,
+                        Collections.<String>emptySet()));
+        check("screen size unknown: black and white",
+                !ColorRules.colourAllowed(Collections.singletonList(app("com.google.android.apps.maps")), 0, MAPS));
+
+        eq("colour apps unset: maps", MAPS, ColorRules.colourApps(null));
+        check("default includes Google Maps", MAPS.contains("com.google.android.apps.maps"));
+        check("default includes CoMaps from Play and F-Droid",
+                MAPS.contains("app.comaps.google") && MAPS.contains("app.comaps.fdroid"));
+        eq("colour apps cleared: none", Collections.<String>emptySet(), ColorRules.colourApps("  "));
+        eq("colour apps \"none\": none", Collections.<String>emptySet(), ColorRules.colourApps(" None "));
+        eq("colour apps set", set("net.osmand", "com.google.android.apps.maps"),
+                ColorRules.colourApps("net.osmand, com.google.android.apps.maps"));
+    }
+
+    // --- Accessibility services list ----------------------------------------
+
+    static void serviceList() {
+        String me = "io.github.zinzuzu.feedguard/io.github.zinzuzu.feedguard.GuardService";
+        String other = "io.github.zinzuzu.watchlimit/io.github.zinzuzu.watchlimit.WatchService";
+        eq("empty list: just Feed Guard", me, ServiceList.withService(null, me));
+        eq("blank list: just Feed Guard", me, ServiceList.withService("", me));
+        eq("added after the others", other + ":" + me, ServiceList.withService(other, me));
+        eq("stray colons dropped", other + ":" + me, ServiceList.withService(":" + other + ": :", me));
+        eq("already there: nothing to do", null, ServiceList.withService(other + ":" + me, me));
+        eq("short form counts", null, ServiceList.withService("io.github.zinzuzu.feedguard/.GuardService", me));
+        eq("spaces around it count", null, ServiceList.withService(" " + other + " : " + me + " ", me));
+        check("a similar name isn't Feed Guard", !ServiceList.contains("io.github.zinzuzu.feedguard/.GuardServiceX", me));
+        check("another package isn't Feed Guard", !ServiceList.contains("io.github.zinzuzu.feedguardx/.GuardService", me));
+        check("garbage isn't Feed Guard", !ServiceList.contains("garbage", me));
+        check("null isn't Feed Guard", !ServiceList.contains(null, me));
+        eq("package of a keyboard", "helium314.keyboard", ServiceList.packageOf("helium314.keyboard/.latin.LatinIME"));
+        eq("package of nothing", null, ServiceList.packageOf(null));
+        eq("package of garbage", null, ServiceList.packageOf("nonsense"));
+    }
+
+    // --- Signature pins -----------------------------------------------------
+
+    static void pins() {
+        Map<String, String> parsed = Pins.parse(Arrays.asList("com.whatsapp=0A1b", "broken", "=00", "org.x=", "org.y=zz", "org.z=abc"));
+        Map<String, String> want = new HashMap<>();
+        want.put("com.whatsapp", "0a1b");
+        eq("pins: good entries only", want, new HashMap<>(parsed));
+        eq("pins: round trip", parsed, Pins.parse(Pins.format(parsed)));
+        eq("pins: nothing stored", 0, Pins.parse(null).size());
+        eq("hex", "00ff10", Pins.hex(new byte[] {0, (byte) 0xff, 0x10}));
+        eq("bytes", "00ff10", Pins.hex(Pins.bytes("00ff10")));
     }
 
     // --- Harness -----------------------------------------------------------

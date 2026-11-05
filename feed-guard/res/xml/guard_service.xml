@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Events from every app are needed to notice when Firefox leaves the screen.
-     Only Firefox's windows are ever read. -->
+<!-- Events from every app are needed to notice when Firefox leaves the screen
+     and which app is on screen. Only Firefox's windows are read in full; for
+     other windows Feed Guard reads just the app's package name. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/service_description"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged|typeViewScrolled"

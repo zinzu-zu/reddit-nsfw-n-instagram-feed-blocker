@@ -36,12 +36,19 @@ final class Guard {
     static final String K_HANDLED = "handledPackages";       // apps already dealt with; not paused again unless reinstalled
     static final String K_OURS = "pausedByGuard";            // apps Feed Guard itself paused
     static final String K_FIREFOX_PAUSED = "firefoxPaused";  // Feed Guard paused Firefox because its access was off
+    static final String K_UNPAUSABLE = "unpausable";         // apps a rule wants paused that Android refused to pause
+    static final String K_PINS = "signaturePins";            // "package=sha256" for listed apps you installed (see Pins)
+    static final String K_NOT_SAME_APP = "notSameApp";       // listed apps whose signer doesn't match their pin
+    static final String K_GRAY_OWNED = "grayOwned";          // Feed Guard switched black and white on and hasn't handed it back
+    static final String K_TURNED_BACK_ON_AT = "turnedBackOnAt"; // wall-clock ms Feed Guard last switched its access back on
 
     // Notification ids.
     static final int N_ARMED = 1;
     static final int N_FIREFOX_PAUSED = 2;
     static final int N_APPS_PAUSED = 3;
     static final int N_URL_UNREADABLE = 4;
+    static final int N_UNPAUSABLE = 5;
+    static final int N_NOT_SAME_APP = 6;
     private static final String CHANNEL = "alerts";
 
     static SharedPreferences prefs(Context c) {
@@ -55,12 +62,7 @@ final class Guard {
     /** Whether Feed Guard is switched on in Settings > Accessibility (whether or not it's running yet). */
     static boolean serviceEnabled(Context c) {
         String list = Settings.Secure.getString(c.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        if (TextUtils.isEmpty(list)) return false;
-        ComponentName me = new ComponentName(c, GuardService.class);
-        for (String item : list.split(":")) {
-            if (me.equals(ComponentName.unflattenFromString(item.trim()))) return true;
-        }
-        return false;
+        return ServiceList.contains(list, new ComponentName(c, GuardService.class).flattenToString());
     }
 
     static void notify(Context c, int id, String title, String text, Intent tap) {
@@ -106,9 +108,25 @@ final class Guard {
         return TextUtils.join(", ", names);
     }
 
+    /** "Name (package)" for each package, one per line, for the status screen. */
+    static String labelsWithPackages(Context c, Collection<String> packages) {
+        List<String> lines = new ArrayList<>();
+        for (String pkg : packages) lines.add(labels(c, java.util.Collections.singleton(pkg)) + " (" + pkg + ")");
+        java.util.Collections.sort(lines, String.CASE_INSENSITIVE_ORDER);
+        return TextUtils.join("\n", lines);
+    }
+
     /** Run from the watchdog job and at start-up: the safety net for when the service isn't running. */
     static void periodicCheck(Context c) {
-        if (armed(c) && !serviceEnabled(c)) AppGate.pauseFirefox(c);
+        try {
+            // With the secure settings permission, a switched-off Feed Guard switches itself back on.
+            SecureSettings.keepServiceOn(c);
+            if (armed(c) && !serviceEnabled(c)) AppGate.pauseFirefox(c);
+            // Without the service nothing knows which app is on screen: black and white, no exceptions.
+            if (!GuardService.isRunning()) ColorGuard.enforceAlone(c);
+        } catch (RuntimeException e) {
+            android.util.Log.e(TAG, "check failed", e);
+        }
         AppGate.scan(c, null);
     }
 }

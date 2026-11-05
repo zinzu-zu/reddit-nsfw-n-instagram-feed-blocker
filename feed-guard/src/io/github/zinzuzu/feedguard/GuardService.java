@@ -18,7 +18,9 @@ import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityWindowInfo;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The guard itself. While Firefox is on screen it checks, at most every 0.6 s
@@ -26,8 +28,9 @@ import java.util.List;
  * the add-on's marker is there. Checks run on a background thread; the cover is
  * shown and hidden on the main thread.
  *
- * It also pauses newly installed browsers and Instagram or Reddit apps, and if
- * its accessibility access is turned off it pauses Firefox (see AppGate).
+ * It also pauses apps through OwnDroid (AppGate), keeps the screen black and
+ * white (ColorGuard), and if its accessibility access is switched off, it
+ * switches it back on, or failing that pauses Firefox.
  */
 public final class GuardService extends AccessibilityService {
     private static final long MIN_GAP_MS = 600;
@@ -36,11 +39,21 @@ public final class GuardService extends AccessibilityService {
     private static final long STATUS_WRITE_MS = 60_000;
     /** The address bar counts as unreadable after this long without finding it while a page is up. */
     private static final long URL_UNREADABLE_MS = 60_000;
+    /** Package changes come in bursts (an update can fire several): scan once they settle. */
+    private static final long SCAN_DELAY_MS = 400;
+
+    private static volatile boolean connected;
+
+    /** Whether the service is connected and guarding, in this process. */
+    static boolean isRunning() {
+        return connected;
+    }
 
     private HandlerThread worker;
     private Handler bg;
     private final Handler main = new Handler(Looper.getMainLooper());
     private Overlay overlay;
+    private ColorGuard colors;
     private final CoverDecision decision = new CoverDecision();
 
     private volatile boolean running;
@@ -50,6 +63,8 @@ public final class GuardService extends AccessibilityService {
     private long lastMarkerWrite, lastUrlWrite;
     private long urlMissingSince = -1;
     private boolean receiversRegistered;
+    private final Set<String> freshInstalls = new HashSet<>();
+    private boolean scanQueued;
 
     private final Runnable check = new Runnable() {
         @Override public void run() { runCheck(); }
@@ -64,10 +79,15 @@ public final class GuardService extends AccessibilityService {
             bg = new Handler(worker.getLooper());
         }
         overlay = new Overlay(this);
+        if (colors != null) colors.stop();
+        final ColorGuard cg = new ColorGuard(this, bg);
+        colors = cg;
         running = true;
+        connected = true;
         registerReceivers();
         bg.post(new Runnable() {
             @Override public void run() {
+                cg.start();
                 AppGate.releaseFirefox(GuardService.this);
                 AppGate.scan(GuardService.this, null);
                 WatchdogJob.schedule(GuardService.this);
@@ -81,6 +101,10 @@ public final class GuardService extends AccessibilityService {
         if (event == null || bg == null) return;
         int type = event.getEventType();
         CharSequence pkg = event.getPackageName();
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            ColorGuard cg = colors;
+            if (cg != null) cg.onWindowsChanged();
+        }
         boolean fromFirefox = pkg != null && Guard.FIREFOX.contentEquals(pkg);
         if (fromFirefox || firefoxWasVisible
                 || type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
@@ -94,10 +118,17 @@ public final class GuardService extends AccessibilityService {
         // Nothing is spoken or announced, so there's nothing to interrupt.
     }
 
-    /** Called when the access is switched off: the dead-man switch. */
+    /**
+     * Called when the access is switched off. With the secure settings
+     * permission Feed Guard switches it straight back on. Without it, the
+     * dead-man switch pauses Firefox.
+     */
     @Override
     public boolean onUnbind(Intent intent) {
-        if (Guard.armed(this)) AppGate.pauseFirefox(this);
+        connected = false;
+        boolean stillOn = SecureSettings.keepServiceOn(this);
+        if (!stillOn && Guard.armed(this)) AppGate.pauseFirefox(this);
+        WatchdogJob.checkSoon(this);
         shutDown();
         return false;
     }
@@ -110,9 +141,16 @@ public final class GuardService extends AccessibilityService {
 
     private void shutDown() {
         running = false;
+        connected = false;
         if (overlay != null) {
             overlay.hide();
             overlay = null;
+        }
+        if (colors != null) {
+            colors.stop(); // after this, no check can let colour back
+            colors = null;
+            // Nothing watches which app is on screen any more: no colour exception for maps.
+            ColorGuard.enforceAlone(this);
         }
         if (receiversRegistered) {
             try {
@@ -122,6 +160,10 @@ public final class GuardService extends AccessibilityService {
                 // Not registered.
             }
             receiversRegistered = false;
+        }
+        synchronized (this) {
+            freshInstalls.clear();
+            scanQueued = false;
         }
         if (worker != null) {
             worker.quitSafely();
@@ -237,6 +279,9 @@ public final class GuardService extends AccessibilityService {
         // receivers registered at runtime, like this one.
         IntentFilter config = new IntentFilter(Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED);
         config.addAction(DevicePolicyManager.ACTION_APPLICATION_DELEGATION_SCOPES_CHANGED);
+        // Someone lifted a pause (OwnDroid, Watch Limit): with "Only apps on the
+        // list" on, an app that isn't listed gets paused again.
+        config.addAction(Intent.ACTION_PACKAGES_UNSUSPENDED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(packageReceiver, packages, Context.RECEIVER_NOT_EXPORTED);
             registerReceiver(configReceiver, config, Context.RECEIVER_NOT_EXPORTED);
@@ -250,24 +295,59 @@ public final class GuardService extends AccessibilityService {
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) {
             Uri data = intent.getData();
-            Handler h = bg;
-            if (data == null || h == null) return;
-            final String pkg = data.getSchemeSpecificPart();
-            final boolean fresh = Intent.ACTION_PACKAGE_ADDED.equals(intent.getAction())
+            if (data == null) return;
+            boolean fresh = Intent.ACTION_PACKAGE_ADDED.equals(intent.getAction())
                     && !intent.getBooleanExtra(Intent.EXTRA_REPLACING, false);
-            h.post(new Runnable() {
-                @Override public void run() { AppGate.scan(GuardService.this, fresh ? pkg : null); }
-            });
+            queueScan(fresh ? data.getSchemeSpecificPart() : null);
         }
     };
 
     private final BroadcastReceiver configReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) {
-            Handler h = bg;
-            if (h == null) return;
-            h.post(new Runnable() {
-                @Override public void run() { AppGate.scan(GuardService.this, null); }
-            });
+            if (!Intent.ACTION_PACKAGES_UNSUSPENDED.equals(intent.getAction())) {
+                final Handler h = bg;
+                if (h != null) {
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            ColorGuard cg = colors;
+                            if (cg != null) cg.onConfigChanged();
+                        }
+                    });
+                }
+            }
+            queueScan(null);
+        }
+    };
+
+    /**
+     * Scans on the background thread. A newly installed app is scanned at once,
+     * so it's paused before it can be opened; other changes wait a moment and
+     * share one scan.
+     */
+    private synchronized void queueScan(String freshInstall) {
+        Handler h = bg;
+        if (h == null) return;
+        if (freshInstall != null) {
+            freshInstalls.add(freshInstall);
+            h.removeCallbacks(runScan);
+            scanQueued = true;
+            h.post(runScan);
+            return;
+        }
+        if (scanQueued) return;
+        scanQueued = true;
+        h.postDelayed(runScan, SCAN_DELAY_MS);
+    }
+
+    private final Runnable runScan = new Runnable() {
+        @Override public void run() {
+            Set<String> fresh;
+            synchronized (GuardService.this) {
+                fresh = new HashSet<>(freshInstalls);
+                freshInstalls.clear();
+                scanQueued = false;
+            }
+            AppGate.scan(GuardService.this, fresh);
         }
     };
 }

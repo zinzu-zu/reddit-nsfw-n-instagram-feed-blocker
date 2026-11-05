@@ -2,9 +2,15 @@
 <resources>
     <string name="app_name">Feed Guard</string>
     <string name="service_label">Feed Guard</string>
-    <string name="service_description">Covers Instagram and Reddit pages in Firefox whenever the Reddit NSFW Blocker add-on isn\'t running on them. It reads only Firefox\'s address bar and a marker the add-on puts on those pages. Nothing is stored or sent anywhere.\n\nIf you turn this off, Firefox is paused until you turn it back on.</string>
-    <string name="r_allowed_title">Apps to leave alone</string>
-    <string name="r_allowed_desc">Package names, separated by commas. Feed Guard won\'t pause these, and lifts its own pause on them.</string>
+    <string name="service_description">Covers Instagram and Reddit pages in Firefox whenever the Reddit NSFW Blocker add-on isn\'t running on them. It reads Firefox\'s address bar and a marker the add-on puts on those pages. For other apps it reads only which app is on screen, to keep maps in colour while the rest stays black and white. Nothing is stored or sent anywhere.\n\nIf you turn this off, Feed Guard turns it back on once it has the secure settings permission. Without that permission, Firefox is paused until you turn it back on.</string>
+    <string name="r_allowed_title">Apps to leave alone (your list)</string>
+    <string name="r_allowed_desc">Package names, separated by commas. Feed Guard never pauses these and lifts its own pause on them. With \u201cOnly apps on the list\u201d on, these are the only apps that open. Feed Guard\'s \u201cPick apps for your list\u201d button copies names to paste here.</string>
+    <string name="r_list_title">Only apps on the list</string>
+    <string name="r_list_desc">Pause every app that isn\'t on the list above, apart from the phone\'s basics: calls, texts, contacts, the clock, the keyboard, settings and OwnDroid. Fill in the list first.</string>
+    <string name="r_gray_title">Black and white</string>
+    <string name="r_gray_desc">Keep the screen black and white, except while only a colour app is on screen. Needs the secure settings permission, given over adb. On unless turned off here.</string>
+    <string name="r_color_title">Apps shown in colour</string>
+    <string name="r_color_desc">Package names, separated by commas. Unset, it\'s Google Maps, CoMaps and Organic Maps. Write none for no colour at all.</string>
     <string name="r_blocked_title">Extra apps to pause</string>
     <string name="r_blocked_desc">Package names, separated by commas. Paused like other browsers.</string>
 </resources>

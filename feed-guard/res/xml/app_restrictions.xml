@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Feed Guard's settings, edited in OwnDroid (Applications > Feed Guard >
+     Managed configuration). OwnDroid stores only the keys someone set; Feed
+     Guard uses the default for the rest. -->
 <restrictions xmlns:android="http://schemas.android.com/apk/res/android">
     <restriction
         android:key="allowed_apps"
@@ -6,6 +9,24 @@
         android:description="@string/r_allowed_desc"
         android:restrictionType="string"
         android:defaultValue="" />
+    <restriction
+        android:key="only_listed_apps"
+        android:title="@string/r_list_title"
+        android:description="@string/r_list_desc"
+        android:restrictionType="bool"
+        android:defaultValue="false" />
+    <restriction
+        android:key="grayscale"
+        android:title="@string/r_gray_title"
+        android:description="@string/r_gray_desc"
+        android:restrictionType="bool"
+        android:defaultValue="true" />
+    <restriction
+        android:key="color_apps"
+        android:title="@string/r_color_title"
+        android:description="@string/r_color_desc"
+        android:restrictionType="string"
+        android:defaultValue="com.google.android.apps.maps, app.comaps.google, app.comaps.fdroid, app.organicmaps" />
     <restriction
         android:key="blocked_apps"
         android:title="@string/r_blocked_title"
