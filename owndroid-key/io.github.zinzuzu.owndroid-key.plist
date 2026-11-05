@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Every 15 minutes, as root: seal OwnDroid's key again once its window is over.
+     install.sh copies this to /Library/LaunchDaemons. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.zinzuzu.owndroid-key</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Library/Application Support/OwnDroidKey/owndroid-key</string>
+		<string>relock</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/owndroid-key.log</string>
+</dict>
+</plist>

@@ -1,0 +1,555 @@
+#!/bin/bash
+# fake-adb: the adb phone-kit's tests talk to. It answers the commands the kit
+# sends from the pretend phone in $FAKE_PHONE (see phone-lib.sh), in the
+# formats of Android 14 to 16's own reports, and plays OwnDroid 8.4's API and
+# Shortcuts and Feed Guard's pauses. Only what the kit uses is here.
+set -u
+. "$(dirname "$0")/phone-lib.sh"
+
+reachable() { has plugged && has authorized && [ "$(setting global adb_enabled)" != 0 ]; }
+
+need_phone() {
+  if [ "$1" != "$(f serial)" ] || ! reachable; then
+    echo "adb: device '$1' not found" >&2
+    exit 1
+  fi
+}
+
+# --- What the phone's shell runs ------------------------------------------------
+
+getprop() { f "prop/$1" || echo; }
+
+pm() {
+  local i n
+  case "${1:-}" in
+    list)
+      case "${2:-}" in
+        features) cat "$P/features" ;;
+        users)
+          echo "Users:"
+          printf '\tUserInfo{0:Owner:c13} running\n'
+          n=$(num users 1); i=1
+          while [ "$i" -lt "$n" ]; do printf '\tUserInfo{1%d:Private space:1090}\n' "$i"; i=$((i + 1)); done ;;
+        packages) for i in $(pkgs); do echo "package:$i"; done ;;
+      esac ;;
+    path) installed "$2" && echo "package:/data/app/~~fake==/$2-fake==/base.apk" ;;
+    grant)
+      if ! installed "$2"; then
+        echo "Exception occurred while executing 'grant':" >&2
+        echo "java.lang.IllegalArgumentException: Unknown package: $2" >&2; return 255
+      fi
+      if ! on "pkg/$2/requests" "$3"; then
+        echo "Exception occurred while executing 'grant':" >&2
+        echo "java.lang.SecurityException: Package $2 has not requested permission $3" >&2; return 255
+      fi
+      add "pkg/$2/perms" "$3" ;;
+    revoke) installed "$2" && ! has "pkg/$2/stuck" && del "pkg/$2/perms" "$3" ;;
+    *) echo "fake pm: $*" >&2; return 1 ;;
+  esac
+}
+
+dpm() {
+  local pkg=${2%%/*}
+  [ "${1:-}" = set-device-owner ] || { echo "fake dpm: $*" >&2; return 1; }
+  fail() {
+    echo "Exception occurred while executing 'set-device-owner':" >&2
+    echo "$1" >&2
+    echo "	at com.android.server.devicepolicy.DevicePolicyManagerService.enforceCanSetDeviceOwnerLocked(DevicePolicyManagerService.java:9876)" >&2
+    echo "	at com.android.server.devicepolicy.DevicePolicyManagerServiceShellCommand.runSetDeviceOwner(DevicePolicyManagerServiceShellCommand.java:262)" >&2
+    return 255
+  }
+  installed "$pkg" || { fail "java.lang.IllegalArgumentException: Unknown admin: ComponentInfo{$pkg/$pkg.Receiver}"; return; }
+  [ -z "$(f owner)" ] || { fail "java.lang.IllegalStateException: Trying to set the device owner (ComponentInfo{$pkg/$pkg.Receiver}), but device owner (ComponentInfo{$(f owner)/$(f owner).Receiver}) is already set."; return; }
+  [ "$(num accounts)" -eq 0 ] || { fail "java.lang.IllegalStateException: Not allowed to set the device owner because there are already some accounts on the device."; return; }
+  [ "$(num users 1)" -le 1 ] || { fail "java.lang.IllegalStateException: Not allowed to set the device owner because there are already several users on the device."; return; }
+  put owner "$pkg"
+  echo "Success: Device owner set to package ComponentInfo{$pkg/$pkg.Receiver}"
+  echo "Active admin set to component {$pkg/$pkg.Receiver}"
+}
+
+dump_one_package() {
+  local p=$1 sys="" hid=false sus=false perm
+  [ "$(f "pkg/$p/system")" = 1 ] && sys="SYSTEM "
+  has "pkg/$p/hidden" && hid=true
+  has "pkg/$p/suspended" && sus=true
+  echo "  Package [$p] (7a${#p}c0):"
+  echo "    userId=10$((${#p} + 100))"
+  echo "    pkg=Package{5e1d${#p} $p}"
+  echo "    codePath=/data/app/~~fake==/$p-fake=="
+  echo "    versionCode=$(f "pkg/$p/code") minSdk=26 targetSdk=35"
+  echo "    versionName=$(f "pkg/$p/version")"
+  echo "    flags=[ ${sys}HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]"
+  echo "    privateFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE ]"
+  echo "    timeStamp=2026-11-04 10:00:00"
+  echo "    pkgFlags=[ ${sys}HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]"
+  if [ -s "$P/pkg/$p/requests" ]; then
+    echo "    requested permissions:"
+    while read -r perm; do echo "      $perm"; done < "$P/pkg/$p/requests"
+  fi
+  echo "    install permissions:"
+  echo "      android.permission.INTERNET: granted=true"
+  for perm in $(f "pkg/$p/perms"); do
+    [ "$perm" = android.permission.POST_NOTIFICATIONS ] || echo "      $perm: granted=true"
+  done
+  echo "    User 0: ceDataInode=4242 deDataInode=4243 installed=true hidden=$hid suspended=$sus distractionFlags=0 stopped=false notLaunched=false enabled=0 instant=false virtual=false quarantined=false"
+  echo "      gids=[3003]"
+  echo "      runtime permissions:"
+  if on "pkg/$p/perms" android.permission.POST_NOTIFICATIONS; then
+    echo "        android.permission.POST_NOTIFICATIONS: granted=true, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED ]"
+  elif on "pkg/$p/requests" android.permission.POST_NOTIFICATIONS; then
+    echo "        android.permission.POST_NOTIFICATIONS: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED ]"
+  fi
+}
+
+dump_package() {
+  local only=${1:-} p
+  echo "Database versions:"
+  echo "  Internal:"
+  echo "    sdkVersion=$(sdk) databaseVersion=3"
+  echo
+  echo "Key Set Manager:"
+  echo "  [com.android.chrome]"
+  echo "      Signing KeySets: 23"
+  echo
+  echo "Packages:"
+  for p in $(pkgs); do
+    [ -z "$only" ] || [ "$p" = "$only" ] || continue
+    dump_one_package "$p"
+  done
+  echo
+  # The parts after "Packages:" name packages and permissions again. A reader
+  # that doesn't stop at them would think com.example.leftover is installed
+  # with the secure settings permission.
+  echo "Hidden system packages:"
+  echo "  Package [com.example.leftover] (1eff0):"
+  echo "    userId=10999"
+  echo "    versionName=1.0"
+  echo "    pkgFlags=[ HAS_CODE ]"
+  echo "    install permissions:"
+  echo "      android.permission.WRITE_SECURE_SETTINGS: granted=true"
+  echo "    User 0: ceDataInode=0 deDataInode=0 installed=true hidden=false suspended=true distractionFlags=0"
+  echo
+  echo "Shared users:"
+  echo "  SharedUser [android.uid.shell] (5ee11):"
+  echo "    userId=2000"
+  echo "    install permissions:"
+  echo "      android.permission.WRITE_SECURE_SETTINGS: granted=true"
+  echo
+  echo "Queries:"
+  echo "  system apps queryable: false"
+}
+
+dump_device_policy() {
+  local o p i sc list
+  o=$(f owner)
+  echo "Current Device Policy Manager state:"
+  echo "  Immutable state:"
+  echo "    mHasFeature=true"
+  echo "    mIsWatch=false"
+  echo "    mHasTelephonyFeature=true"
+  if [ -n "$o" ]; then
+    echo "  Device Owner: "
+    echo "    admin=ComponentInfo{$o/$o.Receiver}"
+    echo "    name="
+    echo "    package=$o"
+    echo "    isOrganizationOwnedDevice=true"
+    echo "    User ID: 0"
+    echo
+  fi
+  echo "  Enabled Device Admins (User 0, provisioningState: 3):"
+  if [ -n "$o" ]; then
+    echo "    $o/.Receiver:"
+    echo "      uid=10230"
+    echo "      testOnlyAdmin=false"
+    echo "      policies:"
+    echo "        wipe-data"
+    echo "        force-lock"
+  fi
+  echo "    mPasswordOwner=-1"
+  echo "    mPasswordTokenHandle=0"
+  echo "    mAppsSuspended=false"
+  echo "    mUserSetupComplete=true"
+  echo "    mAffiliationIds=[]"
+  echo "    mNewUserDisclaimer=not_needed"
+  echo "    mDelegationMap="
+  for p in $(ls "$P/deleg" 2>/dev/null); do
+    echo "      $p[size=$(grep -c . "$P/deleg/$p")]"
+    i=0
+    while read -r sc; do echo "        $i: $sc"; i=$((i + 1)); done < "$P/deleg/$p"
+  done
+  echo "    mLockTaskPackages=[]"
+  echo "    mLockTaskFeatures=16"
+  echo
+  # Android 15 and newer list every package's policies here. Android 14 lists
+  # them when its policy engine has them (engine-14).
+  if [ "$(sdk)" -ge 35 ] || { [ "$(sdk)" -ge 34 ] && has engine-14; }; then
+    echo "Local Policies: "
+    echo "  User 0:"
+    for p in $(f blocked-uninstall); do
+      echo "    PackagePolicyKey{mPolicyKey= packageUninstallBlocked; mPackageName= $p}"
+      echo "      Per-admin Policy:"
+      echo "        EnforcingAdmin { mPackageName= $o, mComponentName= ComponentInfo{$o/$o.Receiver}, mAuthorities= [DeviceAdminAuthority {}], mUserId= 0, mIsRoleAuthority= false }"
+      echo "          BooleanPolicyValue { mValue= true }"
+      echo "      Resolved Policy (MostRestrictive):"
+      echo "        BooleanPolicyValue { mValue= true }"
+      echo
+    done
+    echo "    PackagePolicyKey{mPolicyKey= packageUninstallBlocked; mPackageName= com.example.unblocked}"
+    echo "      Per-admin Policy:"
+    echo "        null"
+    echo "      Resolved Policy (MostRestrictive):"
+    echo "        BooleanPolicyValue { mValue= false }"
+    echo
+    list=$(f no-control | paste -s -d, - | sed 's/,/, /g')
+    if [ -n "$list" ]; then
+      echo "    DefaultPolicyKey userControlDisabledPackages"
+      echo "      Per-admin Policy:"
+      echo "        EnforcingAdmin { mPackageName= $o, mComponentName= ComponentInfo{$o/$o.Receiver}, mAuthorities= [DeviceAdminAuthority {}], mUserId= 0, mIsRoleAuthority= false }"
+      echo "          PackageNameSetPolicyValue { [$list] }"
+      echo "      Resolved Policy (PackageSetUnion):"
+      echo "        PackageNameSetPolicyValue { [$list] }"
+      echo
+    fi
+    for p in $(f restr-local); do
+      echo "    UserRestrictionPolicyKey $p"
+      echo "      Per-admin Policy:"
+      echo "        EnforcingAdmin { mPackageName= $o }"
+      echo "          BooleanPolicyValue { mValue= true }"
+      echo "      Resolved Policy (MostRestrictive):"
+      echo "        BooleanPolicyValue { mValue= true }"
+      echo
+    done
+    echo
+    echo "Global Policies: "
+    echo
+    echo "Default admin policy size limit: -1"
+  fi
+}
+
+list_restrictions() {  # prefix, then the files
+  local prefix=$1 any=0 r
+  shift
+  for r in $(cat "$@" 2>/dev/null | sort -u); do echo "$prefix$r"; any=1; done
+  [ $any = 1 ] || echo "${prefix}none"
+}
+
+dump_user() {
+  local i n
+  echo "Current user: 0"
+  echo "Users:"
+  echo "  UserInfo{0:Owner:c13} running"
+  echo "    Type: android.os.usertype.full.SYSTEM"
+  echo "    Flags: 3091 (ADMIN|FULL|INITIALIZED|MAIN|PRIMARY|SYSTEM)"
+  echo "    State: RUNNING_UNLOCKED"
+  echo "    Has profile owner: false"
+  echo "    Restrictions:"
+  echo "      none"
+  echo "    Device policy restrictions:"
+  list_restrictions "      " "$P/restr-local"
+  echo "    Effective restrictions:"
+  list_restrictions "      " "$P/restr-local" "$P/restr-global"
+  n=$(num users 1); i=1
+  while [ "$i" -lt "$n" ]; do
+    echo "  UserInfo{1$i:Private space:1090}"
+    echo "    Type: android.os.usertype.profile.PRIVATE"
+    echo "    Restrictions:"
+    echo "      no_config_vpn"
+    echo "    Effective restrictions:"
+    echo "      no_config_vpn"
+    i=$((i + 1))
+  done
+  echo
+  echo "Device properties:"
+  echo "  Device policy global restrictions:"
+  list_restrictions "    " "$P/restr-global"
+  echo "  Guest restrictions:"
+  echo "    no_sms"
+  echo "    no_install_unknown_sources"
+  echo "    no_config_wifi"
+  echo "    no_outgoing_calls"
+  echo "  Device managed: $([ -n "$(f owner)" ] && echo true || echo false)"
+}
+
+dump_account() {
+  local i n
+  n=$(num accounts)
+  echo "User UserInfo{0:Owner:c13}:"
+  echo "  Accounts: $n"
+  i=0
+  while [ "$i" -lt "$n" ]; do echo "    Account {name=someone$i@gmail.com, type=com.google}"; i=$((i + 1)); done
+  echo
+  echo "  Active Sessions: 0"
+}
+
+dumpsys() {
+  case "${1:-}" in
+    package) shift; dump_package "$@" ;;
+    device_policy) dump_device_policy ;;
+    user) dump_user ;;
+    account) dump_account ;;
+    *) echo "fake dumpsys: $*" >&2; return 1 ;;
+  esac
+}
+
+settings() {
+  case "${1:-}" in
+    get) setting "$2" "$3" ;;
+    put) put "settings/$2/$3" "${4-}" ;;
+    *) echo "fake settings: $*" >&2; return 1 ;;
+  esac
+}
+
+set_op() {  # file, op, mode
+  mkdir -p "$(dirname "$P/$1")"
+  { grep -v "^$2 " "$P/$1" 2>/dev/null; echo "$2 $3"; } > "$P/$1.new"
+  mv "$P/$1.new" "$P/$1"
+}
+get_op() { awk -v o="$2" '$1 == o { print $2 }' "$P/$1" 2>/dev/null; }
+
+appops() {
+  local uid=0 u m
+  case "${1:-}" in
+    set)
+      shift
+      [ "$1" != --uid ] || { uid=1; shift; }
+      installed "$1" || { echo "Error: No UID for $1 in user 0"; return 255; }
+      if [ "$2" = AUTO_REVOKE_PERMISSIONS_IF_UNUSED ] && [ "$(sdk)" -lt 30 ]; then
+        echo "Error: Unknown operation string: $2"; return 255
+      fi
+      if [ $uid = 1 ]; then set_op "pkg/$1/uidops" "$2" "$3"; else set_op "pkg/$1/ops" "$2" "$3"; fi ;;
+    get)
+      u=$(get_op "pkg/$2/uidops" "$3"); m=$(get_op "pkg/$2/ops" "$3")
+      [ -z "$u" ] || echo "Uid mode: $3: $u"
+      if [ -n "$m" ]; then echo "$3: $m; time=+12s345ms ago"
+      elif [ -z "$u" ]; then echo "$3: allow"; fi ;;
+    *) echo "fake appops: $*" >&2; return 1 ;;
+  esac
+}
+
+activity_of() {  # package, launcher or browser
+  case "$1/$2" in
+    "$FF/browser") echo "$FF/org.mozilla.fenix.IntentReceiverActivity" ;;
+    "$FF/launcher") echo "$FF/org.mozilla.fenix.HomeActivity" ;;
+    com.android.chrome/*) echo "com.android.chrome/com.google.android.apps.chrome.Main" ;;
+    "$OD/launcher") echo "$OD/.MainActivityAlias" ;;
+    *) echo "$1/.MainActivity" ;;
+  esac
+}
+
+# Apps that answer an intent: "launcher" for the app drawer, "browser" for web
+# addresses. Hidden apps answer nothing.
+answering() {
+  local p
+  for p in $(pkgs); do has "pkg/$p/$1" && ! has "pkg/$p/hidden" && echo "$p"; done
+}
+
+cmd_package() {
+  local sub=$1 kind=launcher list n i p role
+  shift
+  case " $* " in *" android.intent.category.BROWSABLE "*) kind=browser ;; esac
+  list=$(answering $kind)
+  n=$(printf '%s\n' "$list" | grep -c .)
+  if [ "$sub" = query-activities ]; then
+    if [ "$n" -eq 0 ]; then echo "No activities found"; return; fi
+    echo "$n activities found:"
+    i=0
+    for p in $list; do
+      echo "  Activity #$i:"
+      echo "    priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false"
+      echo "    $(activity_of "$p" $kind)"
+      i=$((i + 1))
+    done
+    return
+  fi
+  # resolve-activity: the browser role's holder, the only browser, or the chooser
+  role=$(f role-browser)
+  if [ "$n" -eq 0 ]; then echo "No activity found"; return; fi
+  if [ -n "$role" ] && printf '%s\n' "$list" | grep -qx "$role"; then p=$role
+  elif [ "$n" -eq 1 ]; then p=$list
+  else
+    echo "priority=0 preferredOrder=0 match=0x0 specificIndex=-1 isDefault=false"
+    echo "android/com.android.internal.app.ResolverActivity"
+    return
+  fi
+  echo "priority=0 preferredOrder=0 match=0x208000 specificIndex=-1 isDefault=true"
+  activity_of "$p" "$kind"
+}
+
+cmd() {
+  case "${1:-}" in
+    package) shift; cmd_package "$@" ;;
+    role)
+      [ "${2:-}" = add-role-holder ] || { echo "fake cmd role: $*" >&2; return 1; }
+      if [ "$3" = android.app.role.BROWSER ] && installed "$4" && has "pkg/$4/browser" && ! has no-role; then
+        put role-browser "$4"
+      fi ;;
+    *) echo "fake cmd: $*" >&2; return 1 ;;
+  esac
+}
+
+# OwnDroid's API: it acts only while it's on and the key matches.
+owndroid_api() {  # action, key, restriction, package
+  local target=${3:-$4}
+  installed "$OD" && [ "$(f owner)" = "$OD" ] || return 0
+  [ "$(f od/api-enabled)" = 1 ] && [ -n "$(f od/api-key)" ] && [ "$2" = "$(f od/api-key)" ] || return 0
+  ! on od/api-ignores "$1 $target" || return 0
+  note od/api.log "$1 $target"
+  case "$1" in
+    ADD_USER_RESTRICTION) restrict_add "$3" ;;
+    CLEAR_USER_RESTRICTION) restrict_del "$3" ;;
+    HIDE) installed "$4" && touch "$P/pkg/$4/hidden" ;;
+    UNHIDE) rm -f "$P/pkg/$4/hidden" ;;
+    BLOCK_UNINSTALL) installed "$4" && add blocked-uninstall "$4" ;;
+    UNBLOCK_UNINSTALL) del blocked-uninstall "$4" ;;
+    DISABLE_USER_CONTROL) installed "$4" && add no-control "$4" ;;
+    ENABLE_USER_CONTROL) del no-control "$4" ;;
+    SUSPEND) installed "$4" && touch "$P/pkg/$4/suspended" ;;
+    UNSUSPEND) rm -f "$P/pkg/$4/suspended" ;;
+  esac
+  return 0
+}
+
+# OwnDroid's Shortcuts: on, with an empty key, until someone turns them off.
+owndroid_shortcut() {  # whether a key came, the key, action, restriction, state
+  installed "$OD" && [ "$(f owner)" = "$OD" ] || return 0
+  if [ "$(f od/shortcuts)" = 0 ]; then note od/toasts "Shortcuts are disabled"; return 0; fi
+  [ "$1" = 1 ] && [ "$2" = "$(f od/shortcuts-key)" ] || return 0
+  note od/shortcuts.log "$3 $4 $5"
+  if [ "$3" = UserRestriction ]; then
+    if [ "$5" = false ]; then restrict_add "$4"; else restrict_del "$4"; fi
+  fi
+  return 0
+}
+
+am() {
+  local what=${1:-} action="" comp="" data="" pkg="" key="" haskey=0 act="" restr="" pk="" state=""
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -W) shift ;;
+      -a) action=$2; shift 2 ;;
+      -c) shift 2 ;;
+      -n) comp=$2; shift 2 ;;
+      -d) data=$2; shift 2 ;;
+      -p) pkg=$2; shift 2 ;;
+      --es)
+        case "$2" in key) key=$3; haskey=1 ;; action) act=$3 ;; restriction) restr=$3 ;; package) pk=$3 ;; esac
+        shift 3 ;;
+      --ez) [ "$2" != state ] || state=$3; shift 3 ;;
+      *) echo "fake am: $1?" >&2; return 1 ;;
+    esac
+  done
+  case "$what" in
+    broadcast)
+      echo "Broadcasting: Intent { act=$action flg=0x400000 ${comp:+cmp=$comp }(has extras) }"
+      [ "$comp" != "$OD/.ApiReceiver" ] || owndroid_api "${action#$OD.action.}" "$key" "$restr" "$pk"
+      [ "$action" != android.intent.action.MEDIA_SCANNER_SCAN_FILE ] || note scanned "$data"
+      echo "Broadcast completed: result=0" ;;
+    start)
+      if [ "$comp" = "$OD/.ShortcutsReceiverActivity" ]; then
+        echo "Starting: Intent { cmp=$comp (has extras) }"
+        owndroid_shortcut "$haskey" "$key" "$act" "$restr" "$state"
+        printf '%s\n' "Status: ok" "LaunchState: COLD" "Activity: $comp" "TotalTime: 96" "WaitTime: 101" "Complete"
+        return 0
+      fi
+      if [ -n "$pkg" ] && { ! installed "$pkg" || has "pkg/$pkg/hidden"; }; then
+        echo "Error: Activity not started, unable to resolve Intent { act=$action pkg=$pkg }"
+        return 0
+      fi
+      echo "Starting: Intent { act=$action ${data:+dat=$data }${pkg:+pkg=$pkg }}"
+      note opened "${pkg:-view}${data:+ $data}" ;;
+    *) echo "fake am: $what" >&2; return 1 ;;
+  esac
+}
+
+input() {
+  [ "${1:-}" = text ] || return 0
+  [ "$(f od/focus)" != api-key ] || printf '%s' "$2" >> "$P/od/field"
+}
+
+ping() {
+  local host
+  for host in "$@"; do :; done
+  if ! has offline && { [ "$(setting global private_dns_mode)" != hostname ] \
+      || [ "$(setting global private_dns_specifier)" = "$(f dns-good)" ]; }; then
+    echo "PING $host (45.90.28.0) 56(84) bytes of data."
+    echo "64 bytes from 45.90.28.0: icmp_seq=1 ttl=57 time=12.3 ms"
+    echo
+    echo "--- $host ping statistics ---"
+    echo "1 packets transmitted, 1 received, 0% packet loss, time 0ms"
+  else
+    echo "ping: unknown host $host" >&2
+    return 2
+  fi
+}
+
+sha256sum() {
+  local path=$1 pkg
+  case "$path" in
+    /data/app/~~fake==/*-fake==/base.apk) pkg=${path#/data/app/~~fake==/}; pkg=${pkg%-fake==/base.apk} ;;
+    *) echo "sha256sum: $path: No such file or directory" >&2; return 1 ;;
+  esac
+  installed "$pkg" || { echo "sha256sum: $path: No such file or directory" >&2; return 1; }
+  command sha256sum "$P/pkg/$pkg/apk" | awk -v p="$path" '{ print $1 "  " p }'
+}
+
+phone_shell() {
+  local rc
+  note shell.log "$1"
+  eval "$1"
+  rc=$?
+  fg_tick
+  return $rc
+}
+
+# --- adb itself ---------------------------------------------------------------
+
+adb_install() {
+  local file="" pkg ver code have x
+  while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) file=$1; shift ;; esac; done
+  echo "Performing Streamed Install"
+  pkg=$(sed -n 's/^package=//p' "$file" | head -n 1)
+  ver=$(sed -n 's/^version=//p' "$file" | head -n 1)
+  code=$(sed -n 's/^code=//p' "$file" | head -n 1)
+  if [ -z "$pkg" ]; then echo "adb: failed to install $file: Failure [INSTALL_PARSE_FAILED_NOT_APK: Failed to parse $file]" >&2; return 1; fi
+  if has "fail-install/$pkg"; then echo "adb: failed to install $file: Failure [$(f "fail-install/$pkg")]" >&2; return 1; fi
+  if installed "$pkg"; then
+    have=$(f "pkg/$pkg/code")
+    if [ "${have:-0}" -gt "${code:-0}" ]; then
+      echo "adb: failed to install $file: Failure [INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected: Update version code $code is older than current $have]" >&2
+      return 1
+    fi
+  fi
+  mkdir -p "$P/pkg/$pkg"
+  cp "$file" "$P/pkg/$pkg/apk"
+  put "pkg/$pkg/version" "$ver"
+  put "pkg/$pkg/code" "${code:-1}"
+  [ -f "$P/pkg/$pkg/system" ] || put "pkg/$pkg/system" 0
+  for x in $(sed -n 's/^flags=//p' "$file"); do touch "$P/pkg/$pkg/$x"; done
+  for x in $(sed -n 's/^requests=//p' "$file"); do add "pkg/$pkg/requests" "$x"; done
+  note installs "$pkg $ver"
+  echo "Success"
+}
+
+adb_push() {
+  mkdir -p "$P/fs$(dirname "$2")"
+  cp "$1" "$P/fs$2" && echo "$1: 1 file pushed, 0 skipped. 1.2 MB/s ($(wc -c < "$1") bytes in 0.001s)"
+}
+
+serial=""
+if [ "${1:-}" = -s ]; then serial=$2; shift 2; fi
+note adb.log "${serial:+-s $serial }$*"
+case "${1:-}" in
+  devices)
+    echo "List of devices attached"
+    if has plugged && [ "$(setting global adb_enabled)" != 0 ]; then
+      if has authorized; then printf '%s\tdevice\n' "$(f serial)"; else printf '%s\tunauthorized\n' "$(f serial)"; fi
+    fi
+    [ ! -e "$P/second-phone" ] || printf 'R5CT1234567\tdevice\n'
+    echo ;;
+  shell) need_phone "$serial"; shift; phone_shell "$*" ;;
+  install) need_phone "$serial"; shift; adb_install "$@" ;;
+  push) need_phone "$serial"; shift; adb_push "$@" ;;
+  get-state) need_phone "$serial"; echo device ;;
+  *) echo "fake-adb: unknown command: $*" >&2; exit 1 ;;
+esac

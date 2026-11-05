@@ -1,0 +1,21 @@
+/* Shows the Feed Guard marker (see guard-marker.js) to Android's accessibility
+   layer. It stays 1 pixel and see-through, so it never shows on screen. When
+   the add-on is turned off, Firefox removes this stylesheet and the marker goes
+   back to display: none. */
+#rnb-guard-marker {
+  display: block !important;
+  visibility: visible !important;
+  position: fixed !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  opacity: 0.01 !important;
+  background: transparent !important;
+  pointer-events: none !important;
+  z-index: 2147483646 !important;
+}

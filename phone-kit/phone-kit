@@ -1,0 +1,1275 @@
+#!/bin/bash
+# phone-kit: puts the whole Android lock on a new or factory-reset phone, over
+# USB from this Mac. It makes OwnDroid the device owner, installs Feed Guard and
+# Watch Limit and switches them on, locks Private DNS to your NextDNS address,
+# makes Firefox the browser, sets OwnDroid's restrictions through OwnDroid's
+# API, checks every part, and hands over to owndroid-key for OwnDroid's code.
+# Your choices live in my-phone.conf, next to this script.
+#
+#   phone-kit setup   set up the phone that's plugged in. It stops where it
+#                     needs a tap on the phone and says which one. If it stops
+#                     early, run it again: it goes on where it was.
+#   phone-kit check   show what's in place on the phone, changing nothing
+#
+# Android only takes delegations, managed configuration and OwnDroid's own
+# settings from OwnDroid's screen, so those stay taps, and the kit checks
+# each one through Android's own reports (dumpsys). OwnDroid's API is on only
+# during setup: the kit won't finish while the API or OwnDroid's Shortcuts
+# still answer. The very last switch, Debug features, ends USB debugging.
+#
+# Written for the /bin/bash 3.2 that comes with macOS.
+
+set -u
+umask 077
+
+PROG=phone-kit
+HERE=$(cd "$(dirname "$0")" && pwd)
+CONF=${PHONE_KIT_CONF:-$HERE/my-phone.conf}
+APKS=${PHONE_KIT_APKS:-$HERE/apks}
+STATE_ROOT=${PHONE_KIT_STATE:-$HOME/.phone-kit}
+NAP=${PHONE_KIT_NAP:-1}           # seconds between looks at the phone
+ADB=${PHONE_KIT_ADB:-adb}
+
+OWNDROID=com.bintianqi.owndroid
+OWNDROID_TAG=v8.4                  # the release the kit downloads and was written for
+OWNDROID_ADMIN=$OWNDROID/.Receiver
+OWNDROID_API=$OWNDROID/.ApiReceiver
+OWNDROID_SHORTCUTS=$OWNDROID/.ShortcutsReceiverActivity
+FEEDGUARD=io.github.zinzuzu.feedguard
+FEEDGUARD_SERVICE=$FEEDGUARD/$FEEDGUARD.GuardService
+WATCHLIMIT=io.github.zinzuzu.watchlimit
+WATCHLIMIT_SERVICE=$WATCHLIMIT/$WATCHLIMIT.WatchService
+FIREFOX=org.mozilla.firefox
+# The YouTube apps Watch Limit counts. Picture-in-picture goes off for them.
+YOUTUBE_APPS="app.revanced.android.youtube com.google.android.youtube app.rvx.android.youtube
+  app.morphe.android.youtube com.vanced.android.youtube com.google.android.apps.youtube.kids
+  org.schabi.newpipe org.polymorphicshade.tubular InfinityLoop1309.NewPipeEnhanced
+  com.github.libretube com.futo.platformplayer"
+# A harmless restriction, switched and switched back to see whether OwnDroid's
+# API or Shortcuts still answer.
+PROBE=no_set_user_icon
+SETTINGS_FILE=/sdcard/Download/feed-guard-settings.json
+NEXTDNS_TEST=test.nextdns.io
+TOTAL=15
+
+SERIAL=""
+SDK=0
+STATE=""
+API_KEY=""
+API_ON=0
+PKGS=""
+RESTR=""
+DP=""
+STEP=0
+CMD=${1:-help}
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "$PROG: $*"; exit 1; }
+ok() { say "   ✓ $*"; }
+nap() { sleep "$NAP"; }
+plural() { if [ "$1" -eq 1 ]; then echo "1 $2"; else echo "$1 ${2}s"; fi; }
+is_number() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; }
+
+# Stops with a message. The setup goes on from here the next time it runs.
+stop() {
+  say ""
+  for line in "$@"; do say "   $line"; done
+  say ""
+  say "Run $PROG setup again once that's done: it goes on from here."
+  exit 1
+}
+
+stopped() {
+  say ""
+  say "Stopped. Run $PROG $CMD again to go on where it stopped."
+  exit 1
+}
+
+trap 'exit 1' TERM
+trap 'say ""; stopped' INT
+
+# For the tests: a script that plays the person tapping on the phone, run at
+# every point where the kit waits for them.
+test_hook() { [ -z "${PHONE_KIT_TEST_ON_PAUSE:-}" ] || "$PHONE_KIT_TEST_ON_PAUSE" "$1" >&2 || true; }
+
+wait_enter() {  # pause id, prompt
+  local ans
+  test_hook "$1"
+  printf '   %s ' "$2" >&2
+  IFS= read -r ans || stopped
+  return 0
+}
+
+yes_no() {  # pause id, question: 0 yes, 1 no
+  local ans
+  test_hook "$1"
+  while :; do
+    printf '   %s ' "$2" >&2
+    IFS= read -r ans || stopped
+    case "$ans" in
+      y|Y|yes|Yes|YES) return 0 ;;
+      n|N|no|No|NO) return 1 ;;
+    esac
+  done
+}
+
+begin() {
+  STEP=$((STEP + 1))
+  say ""
+  say "$STEP/$TOTAL  $*"
+}
+
+# The line of Android's answer that says what went wrong.
+error_line() {
+  local l
+  l=$(printf '%s\n' "$1" | grep -m 1 -E 'Exception: |Error: |Failure \[' | sed 's/^.*Exception: //')
+  [ -n "$l" ] || l=$(printf '%s\n' "$1" | grep . | tail -n 1)
+  printf '%s\n' "$l"
+}
+
+sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+  else sha256sum | awk '{print $1}'; fi
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+
+# --- Settings -------------------------------------------------------------
+
+C_NEXTDNS_HOST="" C_APP_LIST="" C_ONLY_LISTED_APPS=no C_BLACK_AND_WHITE=yes
+C_COLOR_APPS="" C_BLOCK_APPS="" C_HIDE_APPS="" C_PROTECT_APPS=""
+C_LOCK_DEFAULT_APPS="" C_ADDON_PAGE="" C_USE_OWNDROID_API=yes
+PKG_RE='^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$'
+HOST_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+
+conf_error() { die "my-phone.conf, line $1: $2"; }
+
+# "a.b, c.d;e.f" -> "a.b c.d e.f"
+norm_list() { printf '%s' "$1" | tr ',;\t' '   ' | tr -s ' ' | sed 's/^ //; s/ $//'; }
+
+check_list() {  # setting name, list
+  local p
+  for p in $2; do
+    [[ $p =~ $PKG_RE ]] || die "my-phone.conf: $1 has \"$p\", which isn't a package name like com.example.app."
+  done
+}
+
+yes_or_no() {  # setting name, value
+  case "$(printf '%s' "$2" | tr 'A-Z' 'a-z')" in
+    yes|y|on|true) echo yes ;;
+    no|n|off|false) echo no ;;
+    *) die "my-phone.conf: $1 takes yes or no, not \"$2\"." ;;
+  esac
+}
+
+load_conf() {
+  local line key val n=0 p
+  if [ ! -f "$CONF" ]; then
+    if [ "$CONF" = "$HERE/my-phone.conf" ] && [ -f "$HERE/my-phone.conf.example" ]; then
+      cp "$HERE/my-phone.conf.example" "$CONF"
+      say "Made $CONF from the example."
+      say "Put in your NextDNS address and your apps, then run $PROG $CMD again."
+    else
+      say "$PROG: $CONF isn't there."
+    fi
+    exit 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=$(printf '%s' "$line" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]#.*$//; s/[[:space:]]*$//')
+    case "$line" in ''|'#'*) continue ;; *=*) ;; *) conf_error $n "expected NAME=value" ;; esac
+    key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+    val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+    case "$val" in \"*\") val=${val#\"}; val=${val%\"} ;; \'*\') val=${val#\'}; val=${val%\'} ;; esac
+    case "$key" in
+      NEXTDNS_HOST|APP_LIST|ONLY_LISTED_APPS|BLACK_AND_WHITE|COLOR_APPS|BLOCK_APPS|HIDE_APPS|PROTECT_APPS|LOCK_DEFAULT_APPS|ADDON_PAGE|USE_OWNDROID_API)
+        printf -v "C_$key" '%s' "$val" ;;
+      *) conf_error $n "there's no setting called $key" ;;
+    esac
+  done < "$CONF"
+
+  [ -n "$C_NEXTDNS_HOST" ] || die "my-phone.conf: NEXTDNS_HOST is empty. Put in your NextDNS configuration's address, from NextDNS › Setup › Android."
+  [[ $C_NEXTDNS_HOST =~ $HOST_RE ]] || die "my-phone.conf: NEXTDNS_HOST \"$C_NEXTDNS_HOST\" isn't an address like abc123.dns.nextdns.io."
+  [ "$C_NEXTDNS_HOST" != abc123.dns.nextdns.io ] || die "my-phone.conf: NEXTDNS_HOST is still the example. Put in your own, from NextDNS › Setup › Android."
+  C_APP_LIST=$(norm_list "$C_APP_LIST")
+  C_BLOCK_APPS=$(norm_list "$C_BLOCK_APPS")
+  C_HIDE_APPS=$(norm_list "$C_HIDE_APPS")
+  C_PROTECT_APPS=$(norm_list "$C_PROTECT_APPS")
+  C_COLOR_APPS=$(norm_list "$C_COLOR_APPS")
+  check_list APP_LIST "$C_APP_LIST"
+  check_list BLOCK_APPS "$C_BLOCK_APPS"
+  check_list HIDE_APPS "$C_HIDE_APPS"
+  check_list PROTECT_APPS "$C_PROTECT_APPS"
+  [ "$C_COLOR_APPS" = none ] || check_list COLOR_APPS "$C_COLOR_APPS"
+  C_ONLY_LISTED_APPS=$(yes_or_no ONLY_LISTED_APPS "$C_ONLY_LISTED_APPS") || exit 1
+  C_BLACK_AND_WHITE=$(yes_or_no BLACK_AND_WHITE "$C_BLACK_AND_WHITE") || exit 1
+  # Unset, the default apps get locked along with "Only apps on the list", as
+  # Feed Guard's README says: Android never pauses the default home screen or
+  # phone app, so another app made the default would get past the list.
+  [ -n "$C_LOCK_DEFAULT_APPS" ] || C_LOCK_DEFAULT_APPS=$C_ONLY_LISTED_APPS
+  C_LOCK_DEFAULT_APPS=$(yes_or_no LOCK_DEFAULT_APPS "$C_LOCK_DEFAULT_APPS") || exit 1
+  C_USE_OWNDROID_API=$(yes_or_no USE_OWNDROID_API "$C_USE_OWNDROID_API") || exit 1
+  case "$C_ADDON_PAGE" in ''|https://*) ;; *) die "my-phone.conf: ADDON_PAGE has to start with https://" ;; esac
+  case "$C_ADDON_PAGE" in *[[:space:]\'\"\\]*) die "my-phone.conf: ADDON_PAGE can't have spaces or quotes." ;; esac
+
+  if [ "$C_ONLY_LISTED_APPS" = yes ] && [ -z "$C_APP_LIST" ]; then
+    die "my-phone.conf: ONLY_LISTED_APPS=yes with an empty APP_LIST would pause every app but the phone's basics and Firefox. Put your apps on APP_LIST first."
+  fi
+
+  # A listed app is never paused, so a second browser or a feed app on the
+  # list would be a way around the add-on.
+  for p in $C_APP_LIST; do
+    case "$p" in
+      com.instagram.barcelona) ;;   # Threads, which Feed Guard leaves alone anyway
+      *[Ii]nstagram*|*[Rr]eddit*|com.instander.android|org.quantumbadger.redreader|com.onelouder.baconreader|o.o.joey)
+        die "my-phone.conf: APP_LIST has $p, an Instagram or Reddit app. Feed Guard would leave it alone, feed and all. Take it off the list." ;;
+      com.android.chrome|org.mozilla.focus|org.mozilla.klar|org.mozilla.fenix|org.mozilla.firefox_beta|org.mozilla.fennec_fdroid|com.microsoft.emmx|com.duckduckgo.mobile.android|mark.via.gp|org.chromium.chrome|*[Bb]rowser*)
+        die "my-phone.conf: APP_LIST has $p, a browser other than Firefox. Feed Guard would leave it alone, and with it a way around the add-on. Take it off the list." ;;
+    esac
+  done
+}
+
+# --- The phone --------------------------------------------------------------
+
+lost_phone() {
+  say ""
+  say "Lost the phone. Plug it in again and unlock it, then run $PROG $CMD again:"
+  say "it goes on where it stopped."
+  kill -TERM $$ 2>/dev/null   # also stops the script from inside $( )
+  exit 1
+}
+
+# Runs one command line on the phone and prints what it printed.
+on_phone() {
+  local out rc
+  out=$("$ADB" -s "$SERIAL" shell "$1" </dev/null 2>&1); rc=$?
+  case "$(printf '%s\n' "$out" | head -n 1)" in
+    *"device '"*"' not found"*|*"no devices/emulators found"*|*"device offline"*|*"device unauthorized"*) lost_phone ;;
+  esac
+  printf '%s\n' "$out" | tr -d '\r'
+  return $rc
+}
+
+find_phone() {  # 1 to wait for the phone, 0 to give up at once
+  local wait=$1 told="" list ready n unauth
+  command -v "$ADB" >/dev/null 2>&1 || die "adb isn't installed. Install it with: brew install android-platform-tools"
+  while :; do
+    list=$("$ADB" devices 2>/dev/null | tr -d '\r' | sed '1d' | awk -F'\t' 'NF >= 2 { print $1 "\t" $2 }')
+    if [ -n "${ANDROID_SERIAL:-}" ]; then
+      list=$(printf '%s\n' "$list" | awk -F'\t' -v s="$ANDROID_SERIAL" '$1 == s')
+    fi
+    ready=$(printf '%s\n' "$list" | awk -F'\t' '$2 == "device" { print $1 }')
+    n=$(printf '%s\n' "$ready" | grep -c .)
+    if [ "$n" -eq 1 ]; then SERIAL=$ready; return 0; fi
+    [ "$n" -eq 0 ] || die "More than one phone is plugged in. Unplug the others, or pick one: ANDROID_SERIAL=<serial> $PROG $CMD (adb devices lists them)."
+    unauth=$(printf '%s\n' "$list" | awk -F'\t' '$2 == "unauthorized" { print $1 }')
+    if [ -n "$unauth" ]; then
+      [ "$told" = unauth ] || {
+        say "On the phone, tap Allow on \"Allow USB debugging?\" (tick Always allow from this computer)."
+        told=unauth; }
+    else
+      [ "$told" = none ] || {
+        say "No phone found. On the phone: Settings › About phone, tap Build number 7 times, then"
+        say "Settings › System › Developer options › USB debugging on. Plug it in with a cable"
+        say "that carries data, and unlock it."
+        told=none; }
+    fi
+    [ "$wait" = 1 ] || exit 1
+    [ -n "${PHONE_KIT_TEST_ON_PAUSE:-}" ] && { test_hook wait-phone; [ -z "${PHONE_KIT_TEST_ONCE:-}" ] || exit 1; }
+    nap; nap
+  done
+}
+
+preflight() {
+  local release model id
+  SDK=$(on_phone "getprop ro.build.version.sdk")
+  release=$(on_phone "getprop ro.build.version.release")
+  model=$(on_phone "getprop ro.product.model")
+  is_number "$SDK" || die "Couldn't read the phone's Android version: $SDK"
+  [ "$SDK" -ge 29 ] || die "This phone has Android $release. The kit needs Android 10 or newer."
+  on_phone "pm list features" | grep -qx 'feature:android.software.device_admin' \
+    || die "This phone can't have a device owner, so the lock can't go on it."
+  # A factory reset makes a new Android ID, so a reset phone starts afresh.
+  id=$(on_phone "settings get secure android_id" | tr -c 'A-Za-z0-9\n' '_' | head -n 1)
+  STATE="$STATE_ROOT/$(printf '%s' "$SERIAL" | tr -c 'A-Za-z0-9._-' '_')-$id"
+  mkdir -p "$STATE" || die "Can't write to $STATE."
+  [ ! -f "$STATE/api-key" ] || API_KEY=$(cat "$STATE/api-key")
+  say "Phone: $model, Android $release."
+}
+
+# Every package on the phone, one line each:
+#   name system installed hidden suspended has-secure-settings version
+# Only the "Packages:" part of the report counts: the parts after it (hidden
+# system packages, shared users) repeat names and permissions.
+read_packages() {
+  PKGS=$(on_phone "dumpsys package | grep -E '^[A-Za-z]|^  Package \\[|^    versionName=|^    pkgFlags=|^    User 0:|android\\.permission\\.WRITE_SECURE_SETTINGS: granted=true'" | awk '
+    function out() { if (p != "") print p, sys, inst, hid, sus, wss, ver; p = "" }
+    /^[A-Za-z]/ { out(); if (seen) exit; if ($0 ~ /^Packages:/) seen = 1; next }
+    /^  Package \[/ {
+      out()
+      if (!seen) next
+      p = $0; sub(/^  Package \[/, "", p); sub(/\].*/, "", p)
+      sys = 0; inst = 0; hid = 0; sus = 0; wss = 0; ver = "-"
+      next
+    }
+    p == "" { next }
+    /^    versionName=/ { ver = $0; sub(/^    versionName=/, "", ver); if (ver == "") ver = "-"; next }
+    /^    pkgFlags=/ { if ($0 ~ / SYSTEM /) sys = 1; next }
+    /^    User 0:/ { inst = ($0 ~ / installed=true/); hid = ($0 ~ / hidden=true/); sus = ($0 ~ / suspended=true/); next }
+    /WRITE_SECURE_SETTINGS: granted=true/ { wss = 1 }
+    END { out() }')
+}
+
+pkg_field() { printf '%s\n' "$PKGS" | awk -v p="$1" -v f="$2" '$1 == p { print $f; exit }'; }
+installed() { [ "$(pkg_field "$1" 3)" = 1 ]; }
+hidden() { [ "$(pkg_field "$1" 4)" = 1 ]; }
+suspended() { [ "$(pkg_field "$1" 5)" = 1 ]; }
+version_of() { pkg_field "$1" 7; }
+suspended_count() { printf '%s\n' "$PKGS" | awk '$5 == 1' | grep -c .; }
+
+# The device owner, delegations, and the policies Android 14 and newer list
+# per package (uninstall blocked, user control disabled).
+read_policy() {
+  DP=$(on_phone "dumpsys device_policy")
+}
+
+device_owner() {
+  printf '%s\n' "$DP" | awk '/Device Owner:/ { d = 1; next } d && /package=/ { sub(/.*package=/, ""); print; exit }'
+}
+
+has_delegation() {  # package, scope
+  printf '%s\n' "$DP" | awk '
+    /mDelegationMap=/ { m = 1; next }
+    m && /\[size=[0-9]+\]$/ { p = $1; sub(/\[size=.*/, "", p); next }
+    m && /^ *[0-9]+: / { print p, $2; next }
+    m { m = 0 }' | grep -qx "$1 $2"
+}
+
+# "uninstall P" and "control P" for what the policy engine reports.
+engine_policies() {
+  printf '%s\n' "$DP" | awk '
+    /PackagePolicyKey\{mPolicyKey= packageUninstallBlocked; mPackageName= / {
+      p = $0; sub(/.*mPackageName= /, "", p); sub(/\}.*/, "", p); k = "u"; r = 0; next }
+    /DefaultPolicyKey userControlDisabledPackages/ { k = "c"; r = 0; next }
+    /PolicyKey/ { k = ""; next }
+    k != "" && /Resolved Policy/ { r = 1; next }
+    k == "u" && r && /mValue= true/ { print "uninstall", p; k = ""; next }
+    k == "u" && r && /mValue=/ { k = ""; next }
+    k == "c" && r && /PackageNameSetPolicyValue/ {
+      s = $0; sub(/.*\{ *\[/, "", s); sub(/\].*/, "", s)
+      n = split(s, a, /, */)
+      for (i = 1; i <= n; i++) if (a[i] != "") print "control", a[i]
+      k = ""; next }'
+}
+
+
+read_restrictions() {
+  RESTR=$(on_phone "dumpsys user" | awk '
+    /^  UserInfo\{/ { u = ($0 ~ /^  UserInfo\{0:/); e = 0; next }
+    /^  Device policy global restrictions:/ { g = 1; next }
+    g { if ($0 ~ /^    [^ ]/) { if ($1 != "none" && $1 != "null") print $1; next } g = 0 }
+    u && /^    Effective restrictions:/ { e = 1; next }
+    e { if ($0 ~ /^      [^ ]/) { if ($1 != "none" && $1 != "null") print $1; next } e = 0 }' | sort -u)
+}
+
+has_restriction() { printf '%s\n' "$RESTR" | grep -qx "$1"; }
+
+refresh() { read_packages; read_policy; read_restrictions; }
+
+setting() { on_phone "settings get $1 $2" | head -n 1; }
+
+appop() {  # package, op, uid or pkg: the mode
+  on_phone "appops get $1 $2" | awk -v op="$2" -v kind="$3" '
+    kind == "uid" && index($0, "Uid mode: " op ": ") == 1 { s = substr($0, length("Uid mode: " op ": ") + 1); sub(/;.*/, "", s); print s; exit }
+    kind == "pkg" && index($0, op ": ") == 1 { s = substr($0, length(op ": ") + 1); sub(/;.*/, "", s); print s; exit }'
+}
+
+granted() {  # package, permission
+  on_phone "dumpsys package $1" | grep -q "$2: granted=true"
+}
+
+a11y_on() {  # component
+  local list c
+  [ "$(setting secure accessibility_enabled)" = 1 ] || return 1
+  list=$(setting secure enabled_accessibility_services)
+  for c in $(printf '%s' "$list" | tr ':' ' '); do
+    [ "$c" = "$1" ] && return 0
+    [ "$c" = "${1%%/*}/.${1##*.}" ] && return 0   # the short form, pkg/.Service
+  done
+  return 1
+}
+
+default_browser() {
+  on_phone "cmd package resolve-activity --brief -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d https://example.com/" \
+    | awk -F/ 'NF == 2 && $1 ~ /^[A-Za-z0-9_.]+$/ { p = $1 } END { print p }'
+}
+
+launchable() {
+  on_phone "cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER" \
+    | sed 's/^ *//' | awk -F/ 'NF == 2 && $1 ~ /^[A-Za-z0-9_.]+$/ { print $1 }' | sort -u
+}
+
+browsers() {
+  on_phone "cmd package query-activities --brief -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d https://example.com/" \
+    | sed 's/^ *//' | awk -F/ 'NF == 2 && $1 ~ /^[A-Za-z0-9_.]+$/ { print $1 }' | sort -u
+}
+
+open_app() { on_phone "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p $1" >/dev/null; }
+open_url() { on_phone "am start -a android.intent.action.VIEW -d '$1' -p $FIREFOX" >/dev/null; }
+
+app_name() {
+  case "$1" in
+    "$FEEDGUARD") echo "Feed Guard" ;;
+    "$WATCHLIMIT") echo "Watch Limit" ;;
+    "$FIREFOX") echo "Firefox" ;;
+    "$OWNDROID") echo "OwnDroid" ;;
+    com.android.chrome) echo "Chrome" ;;
+    org.mozilla.focus) echo "Firefox Focus" ;;
+    io.nextdns.NextDNS) echo "NextDNS" ;;
+    com.android.vending) echo "the Play Store" ;;
+    com.google.android.youtube) echo "YouTube" ;;
+    com.google.android.apps.youtube.kids) echo "YouTube Kids" ;;
+    app.revanced.android.youtube) echo "YouTube ReVanced" ;;
+    app.rvx.android.youtube) echo "YouTube RVX" ;;
+    app.morphe.android.youtube) echo "YouTube Morphe" ;;
+    com.vanced.android.youtube) echo "YouTube Vanced" ;;
+    org.schabi.newpipe) echo "NewPipe" ;;
+    InfinityLoop1309.NewPipeEnhanced) echo "NewPipe Enhanced" ;;
+    org.polymorphicshade.tubular) echo "Tubular" ;;
+    com.github.libretube) echo "LibreTube" ;;
+    com.futo.platformplayer) echo "Grayjay" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# --- OwnDroid's API and Shortcuts ---------------------------------------------
+
+send_probe() {  # api KEY | shortcuts, whether the probe restriction is on now
+  local action state
+  if [ "$1" = api ]; then
+    if [ "$3" = 1 ]; then action=CLEAR_USER_RESTRICTION; else action=ADD_USER_RESTRICTION; fi
+    on_phone "am broadcast -a $OWNDROID.action.$action -n $OWNDROID_API --es key '$2' --es restriction $PROBE" >/dev/null
+  else
+    # Shortcuts: state false adds the restriction, true clears it.
+    if [ "$3" = 1 ]; then state=true; else state=false; fi
+    on_phone "am start -W -n $OWNDROID_SHORTCUTS --es key '' --es action UserRestriction --es restriction $PROBE --ez state $state" >/dev/null
+  fi
+}
+
+# Switches the harmless probe restriction through OwnDroid's API (with a key)
+# or its Shortcuts (with their default empty key), and switches it back.
+# True if OwnDroid did it: then that way past OwnDroid's lock is open.
+answers() {  # api KEY | shortcuts
+  local was now i=0
+  read_restrictions
+  if has_restriction "$PROBE"; then was=1; else was=0; fi
+  send_probe "$1" "${2:-}" "$was"
+  while [ $i -lt 3 ]; do
+    read_restrictions
+    if has_restriction "$PROBE"; then now=1; else now=0; fi
+    if [ "$now" != "$was" ]; then
+      send_probe "$1" "${2:-}" "$now"     # put it back as it was
+      return 0
+    fi
+    i=$((i + 1))
+    [ $i -ge 3 ] || nap
+  done
+  return 1
+}
+
+api() {  # action, extras
+  on_phone "am broadcast -a $OWNDROID.action.$1 -n $OWNDROID_API --es key '$API_KEY' $2" >/dev/null
+}
+
+new_key() { LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 24; }
+
+# --- The locks --------------------------------------------------------------
+
+restrictions_wanted() {
+  echo disallow_config_private_dns no_config_vpn no_network_reset no_add_user no_user_switch
+  [ "$SDK" -lt 35 ] || echo no_add_private_profile
+  echo no_config_date_time no_safe_boot
+  [ "$C_LOCK_DEFAULT_APPS" = no ] || [ "$SDK" -lt 34 ] || echo disallow_config_default_apps
+}
+
+restriction_name() {
+  case "$1" in
+    disallow_config_private_dns) echo "Network › Configure private DNS" ;;
+    no_config_vpn) echo "Network › Configure VPN" ;;
+    no_network_reset) echo "Network › Reset network" ;;
+    no_add_user) echo "Users › Add user" ;;
+    no_user_switch) echo "Users › Switch user" ;;
+    no_add_private_profile) echo "Users › Create private space" ;;
+    no_config_date_time) echo "Other › Configure date or time" ;;
+    no_safe_boot) echo "Other › Safe boot" ;;
+    disallow_config_default_apps) echo "Applications › Configure default apps" ;;
+    no_debugging_features) echo "Other › Debug features" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+protected_apps() {
+  local p
+  for p in $FEEDGUARD $WATCHLIMIT $FIREFOX $C_PROTECT_APPS; do installed "$p" && echo "$p"; done | awk '!seen[$0]++'
+}
+
+# Every lock with its state, one per line: "ok|missing|unknown KIND TARGET".
+# Uninstall blocks and user control only show up in Android 15 and newer's
+# reports (and in 14's when it keeps them there); before that they're unknown.
+lock_states() {
+  local r p eng
+  for r in $(restrictions_wanted); do
+    if has_restriction "$r"; then echo "ok restriction $r"; else echo "missing restriction $r"; fi
+  done
+  for p in $C_HIDE_APPS; do
+    installed "$p" || continue
+    if hidden "$p"; then echo "ok hide $p"; else echo "missing hide $p"; fi
+  done
+  eng=$(engine_policies)
+  for p in $(protected_apps); do
+    if printf '%s\n' "$eng" | grep -qx "uninstall $p"; then echo "ok uninstall $p"
+    elif [ "$SDK" -ge 35 ]; then echo "missing uninstall $p"
+    else echo "unknown uninstall $p"; fi
+    if printf '%s\n' "$eng" | grep -qx "control $p"; then echo "ok control $p"
+    elif [ "$SDK" -ge 35 ]; then echo "missing control $p"
+    else echo "unknown control $p"; fi
+  done
+}
+
+lock_line() {  # kind target: what it is, for people
+  case "$1" in
+    restriction) echo "User restriction › $(restriction_name "$2"): on" ;;
+    hide) echo "Applications › $(app_name "$2") › Hide" ;;
+    uninstall) echo "Applications › $(app_name "$2") › Block uninstall: on" ;;
+    control) echo "Applications › $(app_name "$2") › Disable user control: on" ;;
+  esac
+}
+
+lock_api() {  # kind target
+  case "$1" in
+    restriction) api ADD_USER_RESTRICTION "--es restriction $2" ;;
+    hide) api HIDE "--es package $2" ;;
+    uninstall) api BLOCK_UNINSTALL "--es package $2" ;;
+    control) api DISABLE_USER_CONTROL "--es package $2" ;;
+  esac
+}
+
+locks_complete() {
+  refresh
+  ! lock_states | grep -q '^missing '
+}
+
+# --- Feed Guard's settings -----------------------------------------------------
+
+json_list() { printf '%s' "$1" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | paste -s -d, - | sed 's/,/, /g'; }
+
+feed_guard_json() {
+  local allowed=$C_APP_LIST
+  [ "$C_ONLY_LISTED_APPS" = no ] || allowed="$FIREFOX $allowed"
+  printf '['
+  printf '{"id":"allowed_apps","vString":"%s"}' "$(json_list "$allowed")"
+  if [ "$C_ONLY_LISTED_APPS" = yes ]; then printf ',{"id":"only_listed_apps","vBool":true}'
+  else printf ',{"id":"only_listed_apps","vBool":false}'; fi
+  if [ "$C_BLACK_AND_WHITE" = yes ]; then printf ',{"id":"grayscale","vBool":true}'
+  else printf ',{"id":"grayscale","vBool":false}'; fi
+  [ -z "$C_COLOR_APPS" ] || printf ',{"id":"color_apps","vString":"%s"}' "$(json_list "$C_COLOR_APPS")"
+  [ -z "$C_BLOCK_APPS" ] || printf ',{"id":"blocked_apps","vString":"%s"}' "$(json_list "$C_BLOCK_APPS")"
+  printf ']\n'
+}
+
+grayscale_on() {
+  [ "$(setting secure accessibility_display_daltonizer_enabled)" = 1 ] \
+    && [ "$(setting secure accessibility_display_daltonizer)" = 0 ]
+}
+
+in_list() {  # item, then the list
+  local x=$1 i
+  shift
+  for i in $*; do [ "$i" = "$x" ] && return 0; done
+  return 1
+}
+
+# True if an app is paused that only "Only apps on the list" pauses: one with
+# an icon that isn't on the list, isn't a browser, an Instagram or Reddit app,
+# an extra app to pause or a YouTube app (Watch Limit pauses those).
+list_mode_working() {
+  local l b p
+  l=$(launchable); b=$(browsers)
+  for p in $l; do
+    in_list "$p" $b $FIREFOX $C_APP_LIST $C_BLOCK_APPS $YOUTUBE_APPS && continue
+    case "$p" in *[Ii]nstagram*|*[Rr]eddit*) continue ;; esac
+    suspended "$p" && return 0
+  done
+  return 1
+}
+
+# Why the phone doesn't look like Feed Guard has the settings; nothing if it does.
+feed_guard_settings_missing() {
+  if [ "$C_BLACK_AND_WHITE" = no ] && grayscale_on; then
+    echo "The screen is still black and white, so Feed Guard doesn't seem to have the settings."
+    return
+  fi
+  if [ "$C_ONLY_LISTED_APPS" = yes ]; then
+    read_packages
+    list_mode_working || echo "Feed Guard hasn't paused any app outside your list, so it doesn't seem to have the settings."
+  fi
+}
+
+# --- The steps of setup ---------------------------------------------------------
+
+one_apk() {  # glob, what: prints the one APK matching it
+  local f found="" n=0
+  for f in "$APKS"/$1; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in *[Tt]est[Kk]ey*) continue ;; esac
+    found=$f; n=$((n + 1))
+  done
+  [ "$n" -le 1 ] || die "There's more than one $2 APK in $APKS. Keep only the one to install."
+  printf '%s\n' "$found"
+}
+
+fetch_owndroid() {
+  local json urls n url name
+  say "Downloading OwnDroid $OWNDROID_TAG from GitHub. It's kept in apks, so every phone gets this same copy."
+  json=$(curl -fsSL --max-time 60 "https://api.github.com/repos/BinTianqi/OwnDroid/releases/tags/$OWNDROID_TAG" 2>/dev/null)
+  urls=$(printf '%s' "$json" | grep -o '"browser_download_url": *"[^"]*\.apk"' | sed 's/.*"\(https:[^"]*\)"$/\1/' | grep -iv testkey)
+  n=$(printf '%s\n' "$urls" | grep -c .)
+  if [ "$n" -ne 1 ]; then
+    die "Couldn't download OwnDroid. Get the regular OwnDroid $OWNDROID_TAG APK (not the testkey one) from https://github.com/BinTianqi/OwnDroid/releases/tag/$OWNDROID_TAG and put it in $APKS."
+  fi
+  url=$urls
+  name=$(basename "$url")
+  curl -fL --max-time 600 -o "$APKS/$name.part" "$url" 2>/dev/null && mv -f "$APKS/$name.part" "$APKS/$name" \
+    || { rm -f "$APKS/$name.part"; die "Couldn't download $url. Put the APK in $APKS by hand."; }
+}
+
+find_apks() {
+  local pin="$APKS/OwnDroid.apk.sha256" sum want
+  mkdir -p "$APKS" || die "Can't write to $APKS."
+  OWNDROID_APK=$(one_apk 'OwnDroid*.apk' OwnDroid) || exit 1
+  if [ -z "$OWNDROID_APK" ]; then
+    fetch_owndroid
+    OWNDROID_APK=$(one_apk 'OwnDroid*.apk' OwnDroid) || exit 1
+    [ -n "$OWNDROID_APK" ] || die "OwnDroid's APK isn't in $APKS."
+  fi
+  sum=$(sha256_of "$OWNDROID_APK")
+  if [ -f "$pin" ]; then
+    want=$(awk '{print $1; exit}' "$pin")
+    [ "$sum" = "$want" ] || die "$(basename "$OWNDROID_APK") isn't the copy the kit used before (its fingerprint changed). If you replaced it on purpose, delete $pin."
+  else
+    printf '%s  %s\n' "$sum" "$(basename "$OWNDROID_APK")" > "$pin" || die "Can't write $pin."
+    say "Kept OwnDroid's fingerprint in apks/OwnDroid.apk.sha256: every phone gets this same copy."
+  fi
+  FEEDGUARD_APK=$(one_apk 'FeedGuard-*.apk' "Feed Guard") || exit 1
+  WATCHLIMIT_APK=$(one_apk 'WatchLimit-*.apk' "Watch Limit") || exit 1
+  [ -n "$FEEDGUARD_APK" ] || die "Feed Guard's APK (FeedGuard-0.2.0.apk or newer) isn't in $APKS."
+  [ -n "$WATCHLIMIT_APK" ] || die "Watch Limit's APK (WatchLimit-1.0.apk or newer) isn't in $APKS."
+}
+
+install_apk() {  # package, file
+  local path have out
+  if installed "$1"; then
+    path=$(on_phone "pm path $1" | sed -n 's/^package://p' | head -n 1)
+    have=$(on_phone "sha256sum '$path'" | awk '{print $1}')
+    [ "$have" != "$(sha256_of "$2")" ] || return 0
+  fi
+  say "   Installing $(basename "$2")..."
+  out=$("$ADB" -s "$SERIAL" install -r "$2" 2>&1 | tr -d '\r')
+  case "$out" in
+    *Success*) read_packages; return 0 ;;
+    *VERSION_DOWNGRADE*) say "   The phone has a newer $(app_name "$1") ($(version_of "$1")), so that one stays."; return 0 ;;
+  esac
+  stop "Installing $(basename "$2") didn't work:" "$(error_line "$out")"
+}
+
+step_owner() {
+  local owner accounts users out
+  begin "OwnDroid as the device owner"
+  read_packages; read_policy
+  owner=$(device_owner)
+  if [ "$owner" = "$OWNDROID" ]; then ok "OwnDroid is the device owner."; return; fi
+  [ -z "$owner" ] || die "$owner is this phone's device owner, and a phone can only have one. Only a factory reset removes it."
+  accounts=$(on_phone "dumpsys account" | awk '$1 == "Accounts:" { n += $2 } END { print n + 0 }')
+  users=$(on_phone "pm list users" | grep -c 'UserInfo{')
+  if [ "$accounts" -gt 0 ]; then
+    stop "The phone has $(plural "$accounts" account) on it, and Android only takes a device owner" \
+      "on a phone with none. Remove them in Settings › Passwords, passkeys & accounts (Google" \
+      "too), or factory-reset the phone and skip signing in. You sign in once OwnDroid is in place."
+  fi
+  if [ "$users" -gt 1 ]; then
+    stop "The phone has more than one user: a guest, a private space or a work profile." \
+      "Remove them (Settings › System › Users, or delete the private space)."
+  fi
+  install_apk "$OWNDROID" "$OWNDROID_APK"
+  out=$(on_phone "dpm set-device-owner $OWNDROID_ADMIN")
+  read_policy
+  [ "$(device_owner)" = "$OWNDROID" ] || stop "Android didn't take OwnDroid as the device owner:" "$(error_line "$out")"
+  ok "OwnDroid is the device owner."
+}
+
+step_secure_settings() {
+  local holders still p
+  begin "No other app with the secure settings permission"
+  say "   Any app with it can switch Private DNS off, even once Private DNS is locked."
+  read_packages
+  holders=$(printf '%s\n' "$PKGS" | awk -v fg="$FEEDGUARD" '$2 == 0 && $6 == 1 && $1 != fg { print $1 }')
+  if [ -z "$holders" ]; then ok "No other app has it."; return; fi
+  for p in $holders; do on_phone "pm revoke $p android.permission.WRITE_SECURE_SETTINGS" >/dev/null; done
+  read_packages
+  still=$(printf '%s\n' "$PKGS" | awk -v fg="$FEEDGUARD" '$2 == 0 && $6 == 1 && $1 != fg { print $1 }')
+  [ -z "$still" ] || stop "Couldn't take it from: $(echo $still)." "Uninstall those apps first."
+  ok "Took it from: $(echo $holders)."
+}
+
+enable_services() {
+  local list c add
+  list=$(setting secure enabled_accessibility_services)
+  case "$list" in null|"") list="" ;; esac
+  for c in $FEEDGUARD_SERVICE $WATCHLIMIT_SERVICE; do
+    a11y_on "$c" && continue
+    case ":$list:" in *":$c:"*|*":${c%%/*}/.${c##*.}:"*) continue ;; esac
+    list=${list:+$list:}$c
+  done
+  on_phone "settings put secure enabled_accessibility_services '$list'" >/dev/null
+  on_phone "settings put secure accessibility_enabled 1" >/dev/null
+}
+
+step_apps() {
+  local f sum p bad=""
+  begin "Feed Guard and Watch Limit"
+  read_packages
+  install_apk "$FEEDGUARD" "$FEEDGUARD_APK"
+  install_apk "$WATCHLIMIT" "$WATCHLIMIT_APK"
+  for f in "$APKS"/extra/*.apk; do
+    [ -f "$f" ] || continue
+    sum=$(sha256_of "$f")
+    [ ! -f "$STATE/extra-$sum" ] || continue
+    say "   Installing $(basename "$f")..."
+    case "$("$ADB" -s "$SERIAL" install -r "$f" 2>&1)" in
+      *Success*) touch "$STATE/extra-$sum" ;;
+      *) say "   $(basename "$f") didn't install. Skipped." ;;
+    esac
+  done
+  read_packages
+  on_phone "pm grant $FEEDGUARD android.permission.WRITE_SECURE_SETTINGS" >/dev/null
+  [ "$SDK" -lt 33 ] || on_phone "pm grant $FEEDGUARD android.permission.POST_NOTIFICATIONS" >/dev/null
+  enable_services
+  if [ "$SDK" -ge 30 ]; then
+    for p in $FEEDGUARD $WATCHLIMIT; do
+      on_phone "appops set --uid $p AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore" >/dev/null
+    done
+  fi
+  open_app "$FEEDGUARD"
+  granted "$FEEDGUARD" android.permission.WRITE_SECURE_SETTINGS || bad="$bad|Feed Guard didn't get the secure settings permission."
+  [ "$SDK" -lt 33 ] || granted "$FEEDGUARD" android.permission.POST_NOTIFICATIONS || bad="$bad|Feed Guard didn't get notifications."
+  a11y_on "$FEEDGUARD_SERVICE" || bad="$bad|Feed Guard's accessibility access didn't switch on."
+  a11y_on "$WATCHLIMIT_SERVICE" || bad="$bad|Watch Limit's accessibility access didn't switch on."
+  if [ "$SDK" -ge 30 ]; then
+    for p in $FEEDGUARD $WATCHLIMIT; do
+      [ "$(appop "$p" AUTO_REVOKE_PERMISSIONS_IF_UNUSED uid)" = ignore ] \
+        || bad="$bad|$(app_name "$p"): Pause app activity if unused is still on."
+    done
+  fi
+  if [ -n "$bad" ]; then
+    local IFS='|'
+    set -f; set -- ${bad#|}; set +f
+    stop "Something didn't take:" "$@"
+  fi
+  ok "Feed Guard $(version_of "$FEEDGUARD") and Watch Limit $(version_of "$WATCHLIMIT") are installed and switched on."
+}
+
+step_dns() {
+  local i=0 out
+  begin "Private DNS with your NextDNS address"
+  if [ "$(setting global private_dns_mode)" != hostname ] || [ "$(setting global private_dns_specifier)" != "$C_NEXTDNS_HOST" ]; then
+    on_phone "settings put global private_dns_specifier $C_NEXTDNS_HOST" >/dev/null
+    on_phone "settings put global private_dns_mode hostname" >/dev/null
+  fi
+  # Before Private DNS is locked, make sure names resolve through it: a wrong
+  # address would leave the phone without internet.
+  say "   Checking that the phone can look up names through $C_NEXTDNS_HOST..."
+  while :; do
+    out=$(on_phone "ping -c 1 -W 3 $NEXTDNS_TEST")
+    case "$out" in *"PING $NEXTDNS_TEST ("*) break ;; esac
+    i=$((i + 1))
+    if [ $i -ge 10 ]; then
+      on_phone "settings put global private_dns_mode opportunistic" >/dev/null
+      stop "The phone couldn't look up names through $C_NEXTDNS_HOST, so its Private DNS is" \
+        "back on Automatic. Check that the phone is online, and that NEXTDNS_HOST in" \
+        "my-phone.conf is your configuration's address from NextDNS › Setup › Android."
+    fi
+    nap; nap
+  done
+  on_phone "settings put global auto_time 1" >/dev/null
+  on_phone "settings put global auto_time_zone 1" >/dev/null
+  [ "$(setting global auto_time)" = 1 ] && [ "$(setting global auto_time_zone)" = 1 ] \
+    || stop "Couldn't switch on automatic date, time and time zone. Switch them on in Settings › System › Date & time."
+  ok "Private DNS is $C_NEXTDNS_HOST, and the date, time and time zone are automatic."
+}
+
+step_firefox() {
+  local p missing="" pip=""
+  begin "Firefox and your apps"
+  read_packages
+  if ! installed "$FIREFOX"; then
+    on_phone "am start -a android.intent.action.VIEW -d 'market://details?id=$FIREFOX'" >/dev/null
+    say "   Firefox isn't on the phone yet. On the phone, the Play Store just opened at Firefox:"
+    say "   sign in to Google and install Firefox. (Or put a Firefox APK in apks/extra and run"
+    say "   setup again.)"
+    while :; do
+      wait_enter firefox "Press Enter when Firefox is installed."
+      read_packages
+      installed "$FIREFOX" && break
+      say "   Firefox isn't there yet."
+    done
+  fi
+  for p in $C_APP_LIST; do [ "$p" = "$FIREFOX" ] || installed "$p" || missing="$missing $p"; done
+  if [ -n "$missing" ] && [ ! -f "$STATE/apps-asked" ]; then
+    say "   These apps from your list aren't on the phone yet:$missing"
+    say "   Install the ones you want now from the Play Store, or put their APKs in apks/extra"
+    say "   and run setup again. Apps on your list can also come later."
+    wait_enter apps "Press Enter to go on."
+    touch "$STATE/apps-asked"
+    read_packages
+  fi
+
+  if [ "$(default_browser)" != "$FIREFOX" ]; then
+    on_phone "cmd role add-role-holder android.app.role.BROWSER $FIREFOX" >/dev/null
+    while [ "$(default_browser)" != "$FIREFOX" ]; do
+      say "   Make Firefox the default browser: Settings › Apps › Default apps › Browser app › Firefox."
+      wait_enter browser "Press Enter when that's done."
+    done
+  fi
+  for p in $YOUTUBE_APPS; do
+    installed "$p" || continue
+    on_phone "appops set $p PICTURE_IN_PICTURE deny" >/dev/null
+    case "$(appop "$p" PICTURE_IN_PICTURE pkg)" in deny|ignore) pip="$pip, $(app_name "$p")" ;; esac
+  done
+  ok "Firefox $(version_of "$FIREFOX") is the default browser."
+  [ -z "$pip" ] || ok "Picture-in-picture is off for ${pip#, }."
+}
+
+step_owndroid_settings() {
+  local need_api=0 api_ok=0 shortcuts_on=0 tries=0
+  begin "OwnDroid's settings: Shortcuts off, and the API on for the setup"
+  if [ "$C_USE_OWNDROID_API" = yes ] && ! locks_complete; then
+    need_api=1
+    if [ -z "$API_KEY" ]; then
+      API_KEY=$(new_key)
+      [ ${#API_KEY} -eq 24 ] || die "Couldn't make a key for OwnDroid's API."
+      printf '%s\n' "$API_KEY" > "$STATE/api-key"
+    fi
+  fi
+  while :; do
+    shortcuts_on=0; answers shortcuts && shortcuts_on=1
+    api_ok=1; [ $need_api = 0 ] || { answers api "$API_KEY" || api_ok=0; }
+    if [ $shortcuts_on = 0 ] && [ $api_ok = 1 ]; then break; fi
+    open_app "$OWNDROID"
+    say "   On the phone, OwnDroid just opened. Tap the gear at the top for its Settings."
+    [ $shortcuts_on = 0 ] || say "   Shortcuts: turn Enable off, then go back. With Shortcuts on, any app can change restrictions past OwnDroid's lock."
+    if [ $api_ok = 0 ] && [ $tries -ge 2 ]; then
+      say "   OwnDroid's API still doesn't answer the setup key."
+      if yes_no api-taps "Switch the locks on by hand instead? [y/n]"; then
+        say "   Then put the API back off: in OwnDroid's Settings › API, turn Enable off and tap Apply."
+        need_api=0
+        continue
+      fi
+    fi
+    if [ $api_ok = 0 ]; then
+      tries=$((tries + 1))
+      say "   API: turn Enable on. Clear the API key field if it has anything in it, and tap it."
+      wait_enter api-field "Press Enter here and the kit types the setup key into that field."
+      on_phone "input text $API_KEY" >/dev/null
+      say "   (The key is $API_KEY. It only works until the API goes off at the end.)"
+      say "   Tap Apply."
+      wait_enter api-apply "Press Enter once you've tapped Apply."
+    else
+      wait_enter shortcuts-off "Press Enter when that's done."
+    fi
+  done
+  ok "Shortcuts are off."
+  if [ $need_api = 1 ]; then
+    API_ON=1
+    ok "OwnDroid's API answers the setup key."
+  fi
+}
+
+step_delegations() {
+  local p missing
+  begin "Feed Guard and Watch Limit as delegated admins"
+  while :; do
+    read_policy
+    missing=""
+    for p in $FEEDGUARD $WATCHLIMIT; do has_delegation "$p" delegation-package-access || missing="$missing $p"; done
+    [ -n "$missing" ] || break
+    open_app "$OWNDROID"
+    say "   In OwnDroid, tap the shield icon › Delegated admins. For each of these, tap Add"
+    say "   delegated admin, tap Package name and pick the app, tick Change package state, and tap Add:"
+    for p in $missing; do say "     $(app_name "$p") ($p)"; done
+    wait_enter delegations "Press Enter when that's done."
+  done
+  ok "Both can pause apps: Feed Guard other browsers, Watch Limit YouTube while it's switched off."
+}
+
+step_feed_guard_settings() {
+  local json sum tmp i why
+  begin "Feed Guard's settings: your app list and black and white"
+  json=$(feed_guard_json)
+  sum=$(printf '%s' "$json" | sha256_stdin)
+  case "$(cat "$STATE/feed-guard-settings" 2>/dev/null)" in
+    "$sum"|"$sum unverified") ok "Imported."; return ;;
+  esac
+  tmp=$(mktemp -d) || die "Can't make a temporary folder."
+  printf '%s\n' "$json" > "$tmp/feed-guard-settings.json"
+  "$ADB" -s "$SERIAL" push "$tmp/feed-guard-settings.json" "$SETTINGS_FILE" >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; stop "Couldn't copy the settings to the phone."; }
+  rm -rf "$tmp"
+  on_phone "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://$SETTINGS_FILE" >/dev/null
+  say "   The kit put your settings in the phone's Download folder, as feed-guard-settings.json."
+  if [ "$C_ONLY_LISTED_APPS" = yes ]; then
+    say "   Once they're in, Feed Guard pauses every app that isn't on your list, apart from"
+    say "   the phone's basics."
+  fi
+  while :; do
+    open_app "$OWNDROID"
+    say "   In OwnDroid: Applications › Feed Guard › Managed configuration. Tap ⋮ at the top,"
+    say "   then Import, and pick feed-guard-settings.json in Downloads. (If it isn't listed"
+    say "   there, open ☰ in the file picker, then your phone, then Download.)"
+    wait_enter import "Press Enter once it's imported."
+    yes_no import-check "Did OwnDroid say Success, and does the screen show your settings? [y/n]" || continue
+    i=0
+    while :; do
+      why=$(feed_guard_settings_missing)
+      [ -n "$why" ] && [ $i -lt 10 ] || break
+      i=$((i + 1)); nap
+    done
+    if [ -z "$why" ]; then
+      printf '%s\n' "$sum" > "$STATE/feed-guard-settings"
+      ok "Imported."
+      return
+    fi
+    say "   $why"
+    if ! yes_no import-again "Import it again? (n goes on, and the check at the end asks you) [y/n]"; then
+      printf '%s unverified\n' "$sum" > "$STATE/feed-guard-settings"
+      ok "Going on."
+      return
+    fi
+  done
+}
+
+step_watch_limit() {
+  begin "Watch Limit's daily limit"
+  if [ -f "$STATE/watch-limit" ]; then ok "Set and locked."; return; fi
+  open_app "$WATCHLIMIT"
+  say "   On the phone, Watch Limit just opened. Set your daily limit and tap Lock the settings."
+  say "   To test it first, set 1 minute, watch a YouTube video for a minute, then set the real limit."
+  until yes_no watch-limit "Did you tap Lock the settings? [y/n]"; do
+    say "   Do that now: once OwnDroid is locked, loosening the limit waits 24 hours."
+  done
+  touch "$STATE/watch-limit"
+  ok "Set and locked."
+}
+
+step_locks() {
+  local todo state kind target
+  begin "OwnDroid's restrictions, hidden apps and protected apps"
+  refresh
+  # What Android doesn't report gets set once, and checked by hand at the end.
+  if [ -f "$STATE/locks-set" ]; then todo=$(lock_states | grep '^missing ')
+  else todo=$(lock_states | grep -v '^ok '); fi
+  if [ -z "$todo" ]; then ok "All in place."; return; fi
+  if [ "$API_ON" = 1 ]; then
+    say "   Setting them through OwnDroid's API..."
+    printf '%s\n' "$todo" | while read -r state kind target; do lock_api "$kind" "$target"; done
+    touch "$STATE/locks-set"
+    refresh
+    todo=$(lock_states | grep '^missing ')
+    if [ -z "$todo" ]; then ok "Set through OwnDroid's API."; return; fi
+    say "   OwnDroid's API didn't set these, so they're taps."
+  fi
+  while [ -n "$todo" ]; do
+    open_app "$OWNDROID"
+    say "   In OwnDroid, switch these on. Leave Debug features off until the very end."
+    printf '%s\n' "$todo" | while read -r state kind target; do say "     $(lock_line "$kind" "$target")"; done
+    wait_enter locks "Press Enter when that's done."
+    touch "$STATE/locks-set"
+    refresh
+    todo=$(lock_states | grep '^missing ')
+    [ -z "$todo" ] || say "   Some aren't on yet."
+  done
+  ok "All in place."
+}
+
+step_api_off() {
+  local api_on shortcuts_on
+  begin "OwnDroid's API and Shortcuts off"
+  while :; do
+    api_on=0; [ -z "$API_KEY" ] || { answers api "$API_KEY" && api_on=1; }
+    shortcuts_on=0; answers shortcuts && shortcuts_on=1
+    [ $api_on = 1 ] || [ $shortcuts_on = 1 ] || break
+    open_app "$OWNDROID"
+    say "   In OwnDroid's Settings (the gear at the top):"
+    [ $api_on = 0 ] || say "     API: turn Enable off and tap Apply."
+    [ $shortcuts_on = 0 ] || say "     Shortcuts: turn Enable off."
+    wait_enter api-off "Press Enter when that's done."
+  done
+  ok "Neither answers any more. (The phone may have shown \"Shortcuts are disabled\": that was the kit checking.)"
+}
+
+# --- The full check ---------------------------------------------------------------
+
+BAD=0
+UNKNOWN=""
+mark_ok() { say "  ✓ $*"; }
+mark_bad() { say "  ✗ $*"; BAD=$((BAD + 1)); }
+mark_unknown() { say "  ? $*"; UNKNOWN="$UNKNOWN|$*"; }
+
+audit() {
+  local p r owner others line kind target dns mode n
+  BAD=0; UNKNOWN=""
+  refresh
+  owner=$(device_owner)
+  if [ "$owner" = "$OWNDROID" ]; then mark_ok "OwnDroid is the device owner ($(version_of "$OWNDROID"))"
+  elif [ -n "$owner" ]; then mark_bad "The device owner is $owner, not OwnDroid"
+  else mark_bad "OwnDroid isn't the device owner"; fi
+
+  others=$(printf '%s\n' "$PKGS" | awk -v fg="$FEEDGUARD" '$2 == 0 && $6 == 1 && $1 != fg { print $1 }')
+  if [ -z "$others" ]; then mark_ok "No other app has the secure settings permission"
+  else mark_bad "These apps have the secure settings permission, which can switch Private DNS off: $(echo $others)"; fi
+
+  for p in $FEEDGUARD $WATCHLIMIT; do
+    if ! installed "$p"; then mark_bad "$(app_name "$p") isn't installed"; continue; fi
+    mark_ok "$(app_name "$p") $(version_of "$p") is installed"
+    if [ "$p" = "$FEEDGUARD" ]; then
+      if granted "$p" android.permission.WRITE_SECURE_SETTINGS; then mark_ok "Feed Guard has the secure settings permission"
+      else mark_bad "Feed Guard doesn't have the secure settings permission"; fi
+      if [ "$SDK" -ge 33 ]; then
+        if granted "$p" android.permission.POST_NOTIFICATIONS; then mark_ok "Feed Guard may show notifications"
+        else mark_bad "Feed Guard may not show notifications"; fi
+      fi
+      if a11y_on "$FEEDGUARD_SERVICE"; then mark_ok "Feed Guard's accessibility access is on"
+      else mark_bad "Feed Guard's accessibility access is off"; fi
+    else
+      if a11y_on "$WATCHLIMIT_SERVICE"; then mark_ok "Watch Limit's accessibility access is on"
+      else mark_bad "Watch Limit's accessibility access is off"; fi
+    fi
+    if [ "$SDK" -ge 30 ]; then
+      if [ "$(appop "$p" AUTO_REVOKE_PERMISSIONS_IF_UNUSED uid)" = ignore ]; then mark_ok "$(app_name "$p"): Pause app activity if unused is off"
+      else mark_bad "$(app_name "$p"): Pause app activity if unused is on"; fi
+    fi
+    if has_delegation "$p" delegation-package-access; then mark_ok "$(app_name "$p") can pause apps (Change package state)"
+    else mark_bad "$(app_name "$p") isn't a delegated admin with Change package state"; fi
+  done
+
+  mode=$(setting global private_dns_mode); dns=$(setting global private_dns_specifier)
+  if [ "$mode" = hostname ] && [ "$dns" = "$C_NEXTDNS_HOST" ]; then mark_ok "Private DNS is $dns"
+  elif [ "$mode" = hostname ]; then mark_bad "Private DNS is $dns, not $C_NEXTDNS_HOST"
+  else mark_bad "Private DNS isn't set to your NextDNS address"; fi
+  if [ "$(setting global auto_time)" = 1 ] && [ "$(setting global auto_time_zone)" = 1 ]; then mark_ok "Date, time and time zone are automatic"
+  else mark_bad "Date, time or time zone isn't automatic"; fi
+
+  if installed "$FIREFOX"; then
+    mark_ok "Firefox $(version_of "$FIREFOX") is installed"
+    if [ "$(default_browser)" = "$FIREFOX" ]; then mark_ok "Firefox is the default browser"
+    else mark_bad "Firefox isn't the default browser"; fi
+    if suspended "$FIREFOX"; then mark_bad "Firefox is paused (Feed Guard does that while it's switched off)"; fi
+  else
+    mark_bad "Firefox isn't installed"
+  fi
+
+  lock_states > "$STATE/.locks" 2>/dev/null || true
+  while read -r line kind target; do
+    case "$line" in
+      ok) mark_ok "$(lock_line "$kind" "$target")" ;;
+      missing) mark_bad "Missing: $(lock_line "$kind" "$target")" ;;
+      unknown) mark_unknown "Android $SDK doesn't report this, so check it in OwnDroid: $(lock_line "$kind" "$target")" ;;
+    esac
+  done < "$STATE/.locks"
+  rm -f "$STATE/.locks"
+
+  for p in $YOUTUBE_APPS; do
+    installed "$p" || continue
+    case "$(appop "$p" PICTURE_IN_PICTURE pkg)" in
+      deny|ignore) mark_ok "Picture-in-picture is off for $(app_name "$p")" ;;
+      *) mark_bad "Picture-in-picture is on for $(app_name "$p")" ;;
+    esac
+  done
+
+  if [ "$C_BLACK_AND_WHITE" = yes ]; then
+    if grayscale_on; then mark_ok "The screen is black and white"
+    else mark_bad "The screen isn't black and white"; fi
+  fi
+  n=""
+  for p in $C_APP_LIST; do installed "$p" && suspended "$p" && n="$n $p"; done
+  if [ -n "$n" ]; then mark_bad "These apps from your list are paused:$n"
+  elif [ -n "$C_APP_LIST" ]; then mark_ok "Nothing on your list is paused"; fi
+  if [ "$C_ONLY_LISTED_APPS" = yes ]; then
+    if list_mode_working; then mark_ok "Only apps on your list open: the rest are paused"
+    elif grep -q unverified "$STATE/feed-guard-settings" 2>/dev/null; then
+      mark_unknown "No app outside your list is paused, so check in OwnDroid › Applications › Feed Guard › Managed configuration that Only apps on the list is on"
+    else mark_bad "No app outside your list is paused: Feed Guard doesn't seem to have your settings"; fi
+  fi
+
+  if [ -n "$API_KEY" ] && answers api "$API_KEY"; then mark_bad "OwnDroid's API still answers the setup key"
+  else mark_ok "OwnDroid's API is off"; fi
+  if answers shortcuts; then mark_bad "OwnDroid's Shortcuts still answer"
+  else mark_ok "OwnDroid's Shortcuts are off"; fi
+}
+
+step_audit() {
+  local item
+  begin "Checking everything"
+  audit
+  if [ "$BAD" -eq 1 ]; then
+    stop "The item marked ✗ isn't right yet, so the last switch has to wait." \
+      "Fix it, or run $PROG setup again, which goes back over the steps."
+  elif [ "$BAD" -gt 1 ]; then
+    stop "The $BAD items marked ✗ aren't right yet, so the last switch has to wait." \
+      "Fix them, or run $PROG setup again, which goes back over the steps."
+  fi
+  if [ -n "$UNKNOWN" ] && [ ! -f "$STATE/checked-by-hand" ]; then
+    say "   Android $SDK doesn't report the items marked ?, so check them on the phone in OwnDroid."
+    until yes_no audit-hand "Are they all on? [y/n]"; do
+      say "   Switch them on in OwnDroid, then answer y."
+    done
+    touch "$STATE/checked-by-hand"
+  fi
+  ok "Everything is in place."
+}
+
+step_pages() {
+  begin "Firefox: the NextDNS check and the add-on"
+  if [ -f "$STATE/pages" ]; then ok "Done."; return; fi
+  open_url "https://$NEXTDNS_TEST"
+  say "   Firefox opened $NEXTDNS_TEST. It should say \"status\": \"ok\". If it doesn't,"
+  say "   Firefox uses its own secure DNS: Firefox › Settings › Privacy and security ›"
+  say "   DNS over HTTPS: Off."
+  wait_enter nextdns "Press Enter to go on."
+  if [ -n "$C_ADDON_PAGE" ]; then
+    open_url "$C_ADDON_PAGE"
+    say "   Firefox opened the add-on's page. Tap Add to Firefox, and allow it in private tabs."
+  else
+    say "   In Firefox, find Reddit NSFW Blocker on addons.mozilla.org, tap Add to Firefox, and"
+    say "   allow it in private tabs."
+  fi
+  wait_enter addon "Press Enter once the add-on is in."
+  open_url "https://www.instagram.com/"
+  say "   Firefox opened instagram.com, so Feed Guard sees the add-on and starts guarding."
+  wait_enter instagram "Press Enter to go on."
+  touch "$STATE/pages"
+  ok "Done."
+}
+
+step_debug() {
+  local i=0
+  begin "Debug features: the last switch"
+  say "   Everything is in place. The last switch turns USB debugging off for good: after"
+  say "   it, neither this kit nor anything else can reach the phone over USB."
+  say "   In OwnDroid › User restriction › Other, turn on Debug features. Keep the cable in:"
+  say "   the kit watches the phone go."
+  test_hook debug
+  while [ "$("$ADB" -s "$SERIAL" get-state 2>/dev/null | tr -d '\r')" = device ]; do
+    i=$((i + 1))
+    [ $i -lt 900 ] || stop "The phone is still reachable over USB, so Debug features isn't on yet."
+    nap
+  done
+  rm -f "$STATE/api-key"
+  ok "USB debugging is off. On the phone, Developer options now shows it greyed out."
+}
+
+step_key() {
+  local tool status
+  begin "OwnDroid's code"
+  tool=$(command -v owndroid-key 2>/dev/null || true)
+  [ -n "$tool" ] || [ ! -x /usr/local/bin/owndroid-key ] || tool=/usr/local/bin/owndroid-key
+  if [ -z "$tool" ]; then
+    say "   Last, lock OwnDroid with a code from this Mac. owndroid-key isn't installed here:"
+    say "   set it up as its README says, then run: owndroid-key seal --new-phone"
+    return 0
+  fi
+  if ! status=$("$tool" status 2>&1); then
+    say "   Last, lock OwnDroid with a code from this Mac, but owndroid-key said:"
+    say "     $(printf '%s\n' "$status" | head -n 1)"
+    say "   Once that's sorted, run: owndroid-key seal --new-phone"
+    return 0
+  fi
+  case "$status" in
+    *"no key yet"*)
+      say "   Last, lock OwnDroid with a code from this Mac. Pick the first date it opens, and run:"
+      say "     owndroid-key seal --open \"YYYY-MM-DD HH:MM\" --every 30d"
+      return 0 ;;
+  esac
+  say "   Last, lock OwnDroid with a new key for this phone, on your usual dates. That"
+  say "   replaces the key the old phone used, so do it once the old phone is reset or gone."
+  if yes_no key "Run owndroid-key seal --new-phone now? [y/n]"; then
+    say ""
+    say "The phone is set up, apart from OwnDroid's code. Over to owndroid-key."
+    say ""
+    exec "$tool" seal --new-phone
+  fi
+  say "   Run it when you're ready: owndroid-key seal --new-phone"
+}
+
+cmd_setup() {
+  load_conf
+  find_phone 1
+  preflight
+  find_apks
+  say "Setting it up as $CONF says."
+  step_owner
+  step_secure_settings
+  step_apps
+  step_dns
+  step_firefox
+  step_owndroid_settings
+  step_delegations
+  step_feed_guard_settings
+  step_watch_limit
+  step_locks
+  step_api_off
+  step_audit
+  step_pages
+  step_debug
+  step_key
+  say ""
+  say "The phone is set up."
+}
+
+cmd_check() {
+  load_conf
+  find_phone 0
+  preflight
+  say ""
+  audit
+  say "  ○ Debug features: the very last switch of setup, once everything else is in place"
+  say ""
+  if [ "$BAD" -gt 0 ]; then
+    say "$(plural "$BAD" thing) to fix. $PROG setup does them, or says which taps they need."
+    exit 1
+  fi
+  if [ -n "$UNKNOWN" ]; then
+    say "Everything Android reports is in place. Check the items marked ? in OwnDroid."
+  else
+    say "Everything is in place."
+  fi
+}
+
+usage() {
+  cat >&2 <<EOF
+Usage:
+  $PROG setup   Set up the phone that's plugged in, as my-phone.conf says.
+                It stops when it needs a tap on the phone and says which one.
+                Run it again after a stop and it goes on where it was.
+  $PROG check   Show what's in place on the phone, without changing anything.
+EOF
+}
+
+case "$CMD" in
+  setup) cmd_setup ;;
+  check) cmd_check ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

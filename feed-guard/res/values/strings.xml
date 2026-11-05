@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Feed Guard</string>
+    <string name="service_label">Feed Guard</string>
+    <string name="service_description">Covers Instagram and Reddit pages in Firefox whenever the Reddit NSFW Blocker add-on isn\'t running on them. It reads only Firefox\'s address bar and a marker the add-on puts on those pages. Nothing is stored or sent anywhere.\n\nIf you turn this off, Firefox is paused until you turn it back on.</string>
+    <string name="r_allowed_title">Apps to leave alone</string>
+    <string name="r_allowed_desc">Package names, separated by commas. Feed Guard won\'t pause these, and lifts its own pause on them.</string>
+    <string name="r_blocked_title">Extra apps to pause</string>
+    <string name="r_blocked_desc">Package names, separated by commas. Paused like other browsers.</string>
+</resources>
