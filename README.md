@@ -65,6 +65,10 @@ Android doesn't let an adult's phone be locked by someone else without device-ma
    - Turning Feed Guard off pauses Firefox.
    The full phone setup, including the code that locks OwnDroid, sealed on the Mac by [`owndroid-key`](owndroid-key/README.md), is in the "Tighter Android lock" guide. For a new or reset phone, [`phone-kit`](phone-kit/README.md) does that setup from the Mac over USB, with your settings in one file.
 
+## YouTube time limit on Android
+
+[Watch Limit](watch-limit/README.md) is a small Android app that limits YouTube to a daily amount of screen-on watching. Listening with the screen off or with YouTube in the background never counts. On a phone where OwnDroid is the device owner, it can't be switched off, uninstalled or loosened on a whim: loosening a setting waits 24 hours or more.
+
 ## Other deeper options I considered
 
 - **Hosts file blocklist.** It's admin-only to edit, but it adds little over the DNS filter you already have.
