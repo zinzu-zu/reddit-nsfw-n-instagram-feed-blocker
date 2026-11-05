@@ -32,22 +32,31 @@ If it stops, because the cable came out, you pressed Ctrl-C or a check didn't pa
 
 ## Before the first phone
 
-1. adb: `brew install android-platform-tools`
+1. adb: `brew install android-platform-tools`. Or skip it: **Set up a phone.command** offers to download Android's platform tools from Google into this folder.
 2. owndroid-key, installed as [its README](../owndroid-key/README.md) says. If it was installed before `seal --new-phone` existed, an administrator runs `sudo bash install.sh` in the new owndroid-key folder once, which keeps the sealed key.
 3. This folder, next to owndroid-key in /Users/Shared. Its `apks` folder holds the apps:
    - `FeedGuard-0.2.0.apk` and `WatchLimit-1.0.apk` come with the kit.
    - OwnDroid: on the first run the kit downloads the regular OwnDroid v8.4 APK (never the testkey one) from its GitHub release. It keeps the APK and its fingerprint in `apks/OwnDroid.apk.sha256`, so every phone gets the same copy. You can also download it yourself and put it in `apks`.
    - `apks/extra`: any other APK, such as Firefox or your own apps. Each one is installed once on every phone.
-4. Your settings: the first run makes `my-phone.conf` from `my-phone.conf.example` and stops. Put in your NextDNS address and your apps.
+4. Your settings: the first run makes `my-phone.conf` from `my-phone.conf.example`. Put in your NextDNS address and your apps. **Set up a phone.command** opens it in TextEdit for you.
 
 ## A new or reset phone
 
 1. Factory-reset it (Settings › System › Reset options › Erase all data), or take it out of the box. In the setup screens, **don't sign in to Google** or add any account: Android only takes a device owner on a phone with no accounts. Do connect to Wi-Fi. You sign in at step 5.
 2. Settings › About phone: tap **Build number** 7 times. Then Settings › System › Developer options: turn on **USB debugging**.
-3. Plug it into the Mac, unlock it, and run `/Users/Shared/phone-kit/phone-kit setup`. On the phone, tap **Allow** on "Allow USB debugging?".
-4. Do what it says. Keep the phone unlocked and the cable in.
+3. Plug it into the Mac, unlock it, and double-click **Set up a phone.command** in this folder. (Or, in Terminal: `/Users/Shared/phone-kit/phone-kit setup`.) On the phone, tap **Allow** on "Allow USB debugging?".
+4. Do what it says. Keep the phone unlocked and the cable in. When it stops for something you need to do, press Enter in its window once that's done, and it goes on from there.
 
 A new key at step 15 means the old phone's OwnDroid can't be opened again, only reset. Do it once the old phone is reset, sold or broken.
+
+### Double-clicking Set up a phone.command
+
+It opens a Terminal window and runs `phone-kit setup` for you, so there's nothing to type. The first time, macOS may not open it, because it was downloaded and isn't from the App Store:
+
+- macOS 15 and newer: click **Done**, then open System Settings › Privacy & Security, scroll down, and click **Open Anyway** next to "Set up a phone.command". Then double-click it again.
+- macOS 14 and older: Control-click it, choose **Open**, then **Open** again.
+
+That's once per download. To stop, close the window: the next double-click goes on from where it was.
 
 ## Your settings
 
@@ -88,6 +97,6 @@ To check whether either still answers, the kit switches the harmless **Set user 
 
 ## Tests
 
-`bash test/run.sh` sets up pretend phones: `test/fake-adb` answers as Android, OwnDroid 8.4 and Feed Guard do, and `test/taps` plays you tapping on the phone. It covers whole setups on Android 10, 14 and 16, list mode, the API and the taps routes, stops and restarts, a pulled cable, and every check that stops the setup. It needs bash and python3.
+`bash test/run.sh` sets up pretend phones: `test/fake-adb` answers as Android, OwnDroid 8.4 and Feed Guard do, and `test/taps` plays you tapping on the phone. It covers whole setups on Android 10, 14 and 16, list mode, the API and the taps routes, stops and restarts, a pulled cable, every check that stops the setup, and **Set up a phone.command**. It needs bash and python3.
 
 Not yet tried on a real phone or a real Mac. The report formats come from Android's source for versions 14 to 16, and OwnDroid's screens and API from its v8.4 source. The tests ran with bash 5 on Linux, so the Mac's bash 3.2 and its BSD tools haven't run it yet.

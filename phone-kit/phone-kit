@@ -57,11 +57,16 @@ SDK=0
 STATE=""
 API_KEY=""
 API_ON=0
+KEY_LEFT=0
 PKGS=""
 RESTR=""
 DP=""
 STEP=0
 CMD=${1:-help}
+# How to go on after a stop: a command, or a key when "Set up a phone.command"
+# runs the kit and sets PHONE_KIT_AGAIN.
+AGAIN=${PHONE_KIT_AGAIN:-run $PROG $CMD again}
+AGAIN_CAP=$(printf '%s' "${AGAIN:0:1}" | tr '[:lower:]' '[:upper:]')${AGAIN:1}
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "$PROG: $*"; exit 1; }
@@ -75,13 +80,13 @@ stop() {
   say ""
   for line in "$@"; do say "   $line"; done
   say ""
-  say "Run $PROG setup again once that's done: it goes on from here."
+  say "$AGAIN_CAP once that's done: it goes on from here."
   exit 1
 }
 
 stopped() {
   say ""
-  say "Stopped. Run $PROG $CMD again to go on where it stopped."
+  say "Stopped. $AGAIN_CAP to go on where it stopped."
   exit 1
 }
 
@@ -171,7 +176,7 @@ load_conf() {
     if [ "$CONF" = "$HERE/my-phone.conf" ] && [ -f "$HERE/my-phone.conf.example" ]; then
       cp "$HERE/my-phone.conf.example" "$CONF"
       say "Made $CONF from the example."
-      say "Put in your NextDNS address and your apps, then run $PROG $CMD again."
+      say "Put in your NextDNS address and your apps, then $AGAIN."
     else
       say "$PROG: $CONF isn't there."
     fi
@@ -236,7 +241,7 @@ load_conf() {
 
 lost_phone() {
   say ""
-  say "Lost the phone. Plug it in again and unlock it, then run $PROG $CMD again:"
+  say "Lost the phone. Plug it in again and unlock it, then $AGAIN:"
   say "it goes on where it stopped."
   kill -TERM $$ 2>/dev/null   # also stops the script from inside $( )
   exit 1
@@ -1125,10 +1130,10 @@ step_audit() {
   audit
   if [ "$BAD" -eq 1 ]; then
     stop "The item marked ✗ isn't right yet, so the last switch has to wait." \
-      "Fix it, or run $PROG setup again, which goes back over the steps."
+      "Fix it, or $AGAIN, which goes back over the steps."
   elif [ "$BAD" -gt 1 ]; then
     stop "The $BAD items marked ✗ aren't right yet, so the last switch has to wait." \
-      "Fix them, or run $PROG setup again, which goes back over the steps."
+      "Fix them, or $AGAIN, which goes back over the steps."
   fi
   if [ -n "$UNKNOWN" ] && [ ! -f "$STATE/checked-by-hand" ]; then
     say "   Android $SDK doesn't report the items marked ?, so check them on the phone in OwnDroid."
@@ -1183,6 +1188,7 @@ step_debug() {
 step_key() {
   local tool status
   begin "OwnDroid's code"
+  KEY_LEFT=1
   tool=$(command -v owndroid-key 2>/dev/null || true)
   [ -n "$tool" ] || [ ! -x /usr/local/bin/owndroid-key ] || tool=/usr/local/bin/owndroid-key
   if [ -z "$tool" ]; then
@@ -1208,7 +1214,12 @@ step_key() {
     say ""
     say "The phone is set up, apart from OwnDroid's code. Over to owndroid-key."
     say ""
-    exec "$tool" seal --new-phone
+    # Not exec: once USB debugging is off, setup can't run again, so the kit
+    # still ends here, and says what's left if owndroid-key didn't finish.
+    trap - INT
+    if "$tool" seal --new-phone; then KEY_LEFT=0; return 0; fi
+    say ""
+    say "   owndroid-key didn't finish, so OwnDroid has no code from this Mac yet."
   fi
   say "   Run it when you're ready: owndroid-key seal --new-phone"
 }
@@ -1235,7 +1246,8 @@ cmd_setup() {
   step_debug
   step_key
   say ""
-  say "The phone is set up."
+  if [ "$KEY_LEFT" = 1 ]; then say "The phone is set up, apart from OwnDroid's code."
+  else say "The phone is set up."; fi
 }
 
 cmd_check() {
