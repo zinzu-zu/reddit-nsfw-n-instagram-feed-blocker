@@ -368,6 +368,83 @@ check "offline sealing, then Ctrl-D, stops" eq $rc 1
 check "offline sealing: nothing sealed" ok test ! -e "$K2"
 check "offline sealing: the test password still works" has "$WORK/out" "still opens with the password test"
 
+# --- A key for a new or reset phone, on any day ---------------------------
+export OWNDROID_KEY_ROOT="$WORK/root3"
+mkdir -p "$OWNDROID_KEY_ROOT/bin" && cp "$RBIN"/* "$OWNDROID_KEY_ROOT/bin/"
+K3="$OWNDROID_KEY_ROOT/sealed/key.tle"
+E3="$OWNDROID_KEY_ROOT/sealed/end.tle"
+S3="$OWNDROID_KEY_ROOT/sealed/schedule"
+get3() { sed -n "s/^$1=//p" "$S3"; }
+show() { "$REAL_DATE" -d "@$1" '+%a %e %b %Y at %H:%M' | tr -s ' '; }
+NEW_PHONE_IN='y\n%s\n%s\ny\ny\n'    # go on, the secret twice, the test code worked, the last check
+
+OPEN3=$(( (FAKE_NOW + 3 * DAY) / 60 * 60 ))
+printf "$NEW_PHONE_IN" "$SECRET_A" "$SECRET_A" \
+  | bash "$SCRIPT" seal --new-phone --open "$(fmt "$OPEN3")" --every 7d > "$WORK/out" 2>&1; rc=$?
+check "new phone, no key yet: works like a first key" eq $rc 0
+check "new phone, no key yet: nothing to warn about" hasnt "$WORK/out" "can't be opened again"
+check "new phone, no key yet: sealed to the date" eq "$(round_of "$K3")" "$((OPEN3 / 3 + 1))"
+R3=$(round_of "$K3")
+
+printf "$NEW_PHONE_IN" "$SECRET_B" "$SECRET_B" | bash "$SCRIPT" seal > "$WORK/out" 2>&1; rc=$?
+check "sealed: a plain seal still refuses" eq $rc 1
+check "sealed: the refusal points at --new-phone" has "$WORK/out" "run: owndroid-key seal --new-phone"
+
+printf 'n\n' | bash "$SCRIPT" seal --new-phone > "$WORK/out" 2>&1; rc=$?
+check "new phone: a no stops" eq $rc 1
+check "new phone: warns about the old phone" has "$WORK/out" "can't be opened again"
+check "new phone: says the date it keeps" has "$WORK/out" "The new key opens on $(show "$OPEN3"),"
+check "new phone: no secret asked after a no" hasnt "$WORK/out" "Secret:"
+check "new phone: key unchanged after a no" eq "$(contents "$K3")" "$SECRET_A"
+
+printf "$NEW_PHONE_IN" "$SECRET_B" "$SECRET_B" \
+  | FAKE_OFFLINE=1 bash "$SCRIPT" seal --new-phone > "$WORK/out" 2>&1; rc=$?
+check "new phone offline: stops" eq $rc 1
+check "new phone offline: sealing fails" has "$WORK/out" "Sealing didn't work"
+check "new phone offline: the test password still works" has "$WORK/out" "still opens with the password test"
+check "new phone offline: key unchanged" eq "$(contents "$K3")" "$SECRET_A"
+
+printf "$NEW_PHONE_IN" "$SECRET_B" "$SECRET_B" | bash "$SCRIPT" seal --new-phone > "$WORK/out" 2>&1; rc=$?
+check "new phone while sealed: works" eq $rc 0
+check "new phone while sealed: holds the new secret" eq "$(contents "$K3")" "$SECRET_B"
+check "new phone while sealed: same date" eq "$(round_of "$K3")" "$R3"
+check "new phone while sealed: schedule unchanged" eq "$(get3 OPEN_AT) $(get3 EVERY) $(get3 WINDOW)" "$OPEN3 $((7 * DAY)) $DAY"
+check "new phone while sealed: end marker follows" eq "$(round_of "$E3")" "$((R3 + DAY / 3))"
+check "new phone while sealed: no code from the old key" hasnt "$WORK/out" "with the current key"
+check "new phone while sealed: steps for the new phone" has "$WORK/out" "In OwnDroid on the new phone"
+check "new phone while sealed: test code uses the new secret" has "$WORK/out" "Code: $(code_for "$SECRET_B")"
+check "new phone while sealed: never prints the secret" hasnt "$WORK/out" "$SECRET_B"
+bash "$SCRIPT" code > "$WORK/out" 2>&1; rc=$?
+check "new phone while sealed: still no code" eq $rc 1
+check "new phone while sealed: logged" has "$OWNDROID_KEY_LOG" "sealed a new key until $(show "$OPEN3")"
+
+check "root side: new-phone while sealed" eq "$(serve "seal $SECRET_C - $((7 * DAY)) $DAY new-phone")" "sealed $OPEN3"
+check "root side: no other kind of seal" eq "$(serve "seal $SECRET_A - $((7 * DAY)) $DAY other")" "error unknown request"
+check "root side: a plain seal still refused" eq "$(serve "seal $SECRET_A - $((7 * DAY)) $DAY")" "refused sealed $OPEN3"
+check "root side: new-phone with a date in the past" eq "$(serve "seal $SECRET_A $((FAKE_NOW - 5)) $((7 * DAY)) $DAY new-phone")" "refused date"
+check "root side: new-phone, odd schedule" eq "$(serve "seal $SECRET_A - $DAY $DAY new-phone")" "error That schedule doesn't work."
+check "root side: key is the last new-phone one" eq "$(contents "$K3")" "$SECRET_C"
+
+OPEN3B=$(( (FAKE_NOW + 10 * DAY) / 60 * 60 ))
+printf "$NEW_PHONE_IN" "$SECRET_A" "$SECRET_A" \
+  | bash "$SCRIPT" seal --new-phone --open "$(fmt "$OPEN3B")" > "$WORK/out" 2>&1; rc=$?
+check "new phone with a new date: works" eq $rc 0
+check "new phone with a new date: says it" has "$WORK/out" "The new key opens on $(show "$OPEN3B"),"
+check "new phone with a new date: sealed to it" eq "$(round_of "$K3")" "$((OPEN3B / 3 + 1))"
+check "new phone with a new date: keeps the interval" eq "$(get3 EVERY)" "$((7 * DAY))"
+
+FAKE_NOW=$((OPEN3B + 3600))                   # in the window
+check "new phone: the window opens" eq "$(serve code | awk '{print $1, $2}')" "code $(code_for "$SECRET_A")"
+printf "$NEW_PHONE_IN" "$SECRET_B" "$SECRET_B" | bash "$SCRIPT" seal --new-phone > "$WORK/out" 2>&1; rc=$?
+check "new phone while open: works" eq $rc 0
+check "new phone while open: no code from the old key" hasnt "$WORK/out" "Code: $(code_for "$SECRET_A")"
+check "new phone while open: says the next date" has "$WORK/out" "The new key opens on $(show $((OPEN3B + 7 * DAY))),"
+check "new phone while open: sealed to the next date" eq "$(round_of "$K3")" "$((OPEN3B / 3 + 1 + 7 * DAY / 3))"
+check "new phone while open: schedule moves on" eq "$(get3 OPEN_AT)" "$((OPEN3B + 7 * DAY))"
+bash "$SCRIPT" code > "$WORK/out" 2>&1; rc=$?
+check "new phone while open: sealed straight away" eq $rc 1
+check "new phone: no leftover files" ok test ! -e "$K3.new" -a ! -e "$E3.new" -a ! -e "$OWNDROID_KEY_ROOT/sealed/.lock"
+
 # --- Through a socket, like launchd's inetd mode -------------------------
 # A small server hands each connection to "owndroid-key serve" as its stdin
 # and stdout, and your side talks to it with nc -U.

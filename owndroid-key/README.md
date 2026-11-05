@@ -39,6 +39,7 @@ From your own account:
 - `owndroid-key code` shows a code while the key is open.
 - `owndroid-key status` shows when the key opens next.
 - `owndroid-key seal`, with no options while the key is open, sets up a new key on the same schedule. Do this whenever the secret might have been seen. OwnDroid shows it under Settings → App lock → TOTP secret to anyone who's inside.
+- `owndroid-key seal --new-phone` sets up a key for a new or factory-reset phone, on any day, sealed or not. It keeps your schedule: while the key is sealed, the new one opens on the same date, and while it's open, on the next date. `--open`, `--every` and `--window` change that, as for a first key. The current key is deleted, so a phone whose OwnDroid still uses it can't be opened again, only reset. Use it once the old phone is reset, sold or broken. It adds no way in: the new phone's OwnDroid never had the old key, and the new key opens nothing before its date. [`phone-kit`](../phone-kit/README.md) runs it at the end of a new phone's setup.
 
 The script never shows the secret after you type it in.
 
@@ -65,7 +66,7 @@ The script never shows the secret after you type it in.
 
 ## Start over or remove it
 
-Only do this when OwnDroid no longer uses this key, for example after a factory reset, or if a new key was half set up and OwnDroid still opens with the password `test`. Otherwise deleting the sealed folder locks OwnDroid for good.
+Only do this when OwnDroid no longer uses this key, for example after a factory reset, or if a new key was half set up and OwnDroid still opens with the password `test`. Otherwise deleting the sealed folder locks OwnDroid for good. For a reset or new phone, `owndroid-key seal --new-phone` does the same without an administrator and keeps your dates.
 
 - Start over (an administrator): `sudo rm -rf "/Library/Application Support/OwnDroidKey/sealed"`, then `owndroid-key seal --open ... --every ...` again.
 - Remove everything (an administrator):

@@ -11,6 +11,7 @@
 # date.
 #
 #   owndroid-key seal --open "YYYY-MM-DD HH:MM" --every 30d [--window 24h]
+#   owndroid-key seal --new-phone   a new key for a new or reset phone, any day
 #   owndroid-key code      a code for OwnDroid, while the key is open
 #   owndroid-key status    when the key opens next
 #
@@ -60,6 +61,10 @@ Usage:
       (24 hours unless you say otherwise) once every period after that.
       While the key is open, run it without options to set up a new key
       on the same schedule.
+  $PROG seal --new-phone
+      Set up a key for a new or reset phone, on any day, on the same
+      schedule. The current key is deleted, so a phone still using it
+      can't be opened again until it's reset.
   $PROG code      Show a code for OwnDroid, while the key is open.
   $PROG status    Show when the key opens next.
 EOF
@@ -385,8 +390,10 @@ cmd_relock() {
 #   status        none | open CLOSE_AT EVERY WINDOW | sealed OPEN_AT EVERY WINDOW
 #   code          none | code CODE SECONDS_LEFT CLOSE_AT | sealed OPEN_AT
 #   begin         ok | none | sealed OPEN_AT   (a new key is about to be set up)
-#   seal SECRET OPEN_AT|- EVERY WINDOW
+#   seal SECRET OPEN_AT|- EVERY WINDOW [new-phone]
 #                 sealed OPEN_AT | none | refused sealed OPEN_AT | refused date
+#                 With new-phone the key is replaced even while it's sealed: it's
+#                 for a phone whose OwnDroid never had the current key.
 # and "error MESSAGE" when something went wrong. Nothing else is accepted, and
 # nothing sealed ever leaves this side: only codes, and only while the key opens.
 
@@ -466,8 +473,8 @@ serve_begin() {
   esac
 }
 
-serve_seal() {  # secret, first date (or -), every, window
-  local secret=${1:-} open=${2:-} every=${3:-} window=${4:-} now held="" st e
+serve_seal() {  # secret, first date (or -), every, window, and new-phone or nothing
+  local secret=${1:-} open=${2:-} every=${3:-} window=${4:-} kind=${5:-} now held="" st e
   case "$secret" in ''|*[!A-Z2-7]*) reply "error That isn't a key."; return ;; esac
   if [ "${#secret}" -lt 16 ] || [ "${#secret}" -gt 128 ]; then
     reply "error That isn't a key."
@@ -480,6 +487,7 @@ serve_seal() {  # secret, first date (or -), every, window
     return
   fi
   [ "$open" = - ] || is_number "$open" || { reply "error That date doesn't work."; return; }
+  case "$kind" in ''|new-phone) ;; *) reply "error unknown request"; return ;; esac
   ( cmd_relock ) >/dev/null 2>&1   # a window that's over is closed first
   take_lock || { reply "error Busy. Try again in a minute."; return; }
   now=$(date +%s)
@@ -494,14 +502,18 @@ serve_seal() {  # secret, first date (or -), every, window
       2) reply "error $(drand_error)"; return ;;
       *)
         # Not open, and no new key was started while it was: OwnDroid still
-        # uses this one, so replacing it would lock OwnDroid for good.
-        [ -n "$held" ] || { reply "refused sealed $(get OPEN_AT)"; return; } ;;
+        # uses this one, so replacing it would lock OwnDroid for good. A key
+        # for a new or reset phone is the exception: that phone's OwnDroid
+        # never had this key, and the new one opens nothing before its date.
+        [ -n "$held" ] || [ "$kind" = new-phone ] || { reply "refused sealed $(get OPEN_AT)"; return; } ;;
     esac
-    OLD_ROUND=$(round_of "$KEY")
-    OLD_AT=$(get OPEN_AT)
-    if ! is_number "$OLD_ROUND" || ! is_number "$OLD_AT"; then
-      reply "error Can't read the current key's schedule."
-      return
+    if [ "$open" = - ]; then
+      OLD_ROUND=$(round_of "$KEY")
+      OLD_AT=$(get OPEN_AT)
+      if ! is_number "$OLD_ROUND" || ! is_number "$OLD_AT"; then
+        reply "error Can't read the current key's schedule. Give a date with --open."
+        return
+      fi
     fi
   elif [ "$open" = - ]; then
     reply none
@@ -615,12 +627,16 @@ local_code() {
 }
 
 cmd_seal() {
-  local open="" every="" window="" rekey=0 now answer a known_every="" known_window=""
+  # mode: first (no key yet), rekey (the key is open, same phone) or
+  # new-phone (a key for a new or reset phone, on any day)
+  local open="" every="" window="" mode=first newphone=0 keep=0 now answer a
+  local known_every="" known_window="" known_state="" known_at="" next_at
   while [ $# -gt 0 ]; do
     case "$1" in
       --open) open=${2:-}; shift ;;
       --every) every=${2:-}; shift ;;
       --window) window=${2:-}; shift ;;
+      --new-phone) newphone=1 ;;
       *) die "Unknown option: $1 (see $PROG help)" ;;
     esac
     shift
@@ -629,23 +645,32 @@ cmd_seal() {
   a=$(talk status)
   set -f; set -- $a; set +f
   case "${1:-}" in
-    none) ;;
-    open) rekey=1 known_every=${3:-} known_window=${4:-} ;;
-    sealed) die "The key is sealed until $(show_date "$2"). A new key can only be set up while the current one is open, because OwnDroid only opens with the current one." ;;
+    none) ;;   # nothing to replace: a first key, with or without --new-phone
+    open|sealed)
+      if [ "$1" = sealed ] && [ "$newphone" = 0 ]; then
+        say "$PROG: The key is sealed until $(show_date "$2")."
+        say "A new key can only be set up while the current one is open, because OwnDroid"
+        say "only opens with the current one. For a new or reset phone, whose OwnDroid"
+        say "never had this key, run: $PROG seal --new-phone"
+        exit 1
+      fi
+      known_state=$1 known_at=${2:-} known_every=${3:-} known_window=${4:-}
+      if [ "$newphone" = 1 ]; then mode=new-phone; else mode=rekey; fi
+      keep=1 ;;   # a key exists: keep its schedule unless told otherwise
     *) die "${a#error }" ;;
   esac
 
   now=$(date +%s)
   if [ -n "$every" ]; then
     EVERY_S=$(to_seconds "$every") || die "--every takes days or weeks, like 30d or 4w."
-  elif [ "$rekey" = 1 ] && is_number "$known_every"; then
+  elif [ "$keep" = 1 ] && is_number "$known_every"; then
     EVERY_S=$known_every
   else
     die "Say how often the key opens, like: --every 30d"
   fi
   if [ -n "$window" ]; then
     WINDOW_S=$(to_seconds "$window") || die "--window takes hours, like 24h."
-  elif [ "$rekey" = 1 ] && is_number "$known_window"; then
+  elif [ "$keep" = 1 ] && is_number "$known_window"; then
     WINDOW_S=$known_window
   else
     WINDOW_S=86400
@@ -657,14 +682,34 @@ cmd_seal() {
     OPEN_AT_WANTED=$(to_epoch "$open") || die "Write the date like this: --open \"2026-12-01 18:00\""
     [ "$OPEN_AT_WANTED" -gt $((now + 600)) ] || die "The date has to be at least 10 minutes from now."
     [ "$OPEN_AT_WANTED" -le $((now + 31622400)) ] || die "The first date has to be within a year from now."
-  elif [ "$rekey" = 1 ]; then
+  elif [ "$keep" = 1 ]; then
     OPEN_AT_WANTED=""
   else
     die "Say when the key first opens, like: --open \"2026-12-01 18:00\""
   fi
 
-  # A typo in the date would lock OwnDroid for longer than meant, so say it back first.
-  if [ -n "$OPEN_AT_WANTED" ]; then
+  if [ "$mode" = new-phone ]; then
+    # The first opening on the same schedule: the current key's own date while
+    # it's sealed, the next date while it's open.
+    if [ -n "$OPEN_AT_WANTED" ]; then
+      next_at=$OPEN_AT_WANTED
+    elif [ "$known_state" = sealed ] && is_number "$known_at"; then
+      next_at=$known_at
+    elif is_number "$known_at" && is_number "$known_window"; then
+      next_at=$((known_at - known_window + EVERY_S))
+    else
+      die "Can't read the current schedule. Give a date with --open."
+    fi
+    say ""
+    say "This deletes the key on this Mac and sets up a new one for a new or reset phone."
+    say "A phone whose OwnDroid still uses the current key can't be opened again, only"
+    say "reset, so do this once the old phone is reset, sold or broken."
+    say ""
+    say "The new key opens on $(show_date "$next_at"), for $(in_hours "$WINDOW_S"),"
+    say "and then once every $(in_days "$EVERY_S"). Until then nobody can open OwnDroid, you included."
+    ask "Go on? [y/n]" || exit 1
+  elif [ -n "$OPEN_AT_WANTED" ]; then
+    # A typo in the date would lock OwnDroid for longer than meant, so say it back first.
     say ""
     say "The key will open on $(show_date "$OPEN_AT_WANTED"), for $(in_hours "$WINDOW_S"),"
     say "and then once every $(in_days "$EVERY_S"). Until then nobody can open OwnDroid, you included."
@@ -672,7 +717,7 @@ cmd_seal() {
   fi
 
   say ""
-  if [ "$rekey" = 1 ]; then
+  if [ "$mode" = rekey ]; then
     a=$(talk begin)
     case "$a" in
       ok) ;;
@@ -689,6 +734,9 @@ cmd_seal() {
       case $? in 0) break ;; 1|3) exit 1 ;; esac
     done
     say "   Then go to Settings → App lock → Remove TOTP, and confirm. Then tap Set up TOTP."
+  elif [ "$mode" = new-phone ]; then
+    say "1. In OwnDroid on the new phone: Settings → App lock. If there's a Remove TOTP"
+    say "   button, tap it and confirm. Then tap Set up TOTP."
   else
     say "1. In OwnDroid: Settings → App lock. If there's a Remove TOTP button, tap it and"
     say "   confirm. Then tap Set up TOTP."
@@ -726,7 +774,11 @@ cmd_seal() {
   say ""
   say "   Sealing the key..."
   while :; do
-    a=$(talk "seal $SECRET ${OPEN_AT_WANTED:--} $EVERY_S $WINDOW_S")
+    if [ "$mode" = new-phone ]; then
+      a=$(talk "seal $SECRET ${OPEN_AT_WANTED:--} $EVERY_S $WINDOW_S new-phone")
+    else
+      a=$(talk "seal $SECRET ${OPEN_AT_WANTED:--} $EVERY_S $WINDOW_S")
+    fi
     set -f; set -- $a; set +f
     case "${1:-} ${2:-}" in
       "sealed "*)
@@ -741,6 +793,12 @@ cmd_seal() {
         say "   Until then OwnDroid still opens with the password test."
         exit 1 ;;
       "refused sealed")
+        if [ "$mode" = new-phone ]; then
+          say "   The key service doesn't know --new-phone yet. An administrator updates it"
+          say "   with: sudo bash install.sh"
+          say "   Until then OwnDroid still opens with the password test."
+          exit 1
+        fi
         say "   The old key was sealed again before the new one could be. OwnDroid now"
         say "   uses the new key, and still opens with the password test. To start over, an"
         say "   administrator clears the old key with:"

@@ -1,0 +1,58 @@
+# phone-kit settings: what the kit puts on every phone you set up.
+# phone-kit makes my-phone.conf from this file the first time it runs. Edit
+# my-phone.conf like a note: one NAME=value per line, # starts a comment.
+#
+# Lists take package names, separated by spaces or commas. An app's package
+# name is at the end of its Play Store link (details?id=com.whatsapp), and
+# Feed Guard's "Pick apps for your list" button copies them for you.
+
+# Your NextDNS configuration's address for Android, from my.nextdns.io ›
+# Setup › Android › Private DNS. The kit sets Private DNS to it and locks it.
+NEXTDNS_HOST=abc123.dns.nextdns.io
+
+# Apps Feed Guard never pauses: its "Apps to leave alone". Firefox needn't be
+# listed. Browsers and Instagram or Reddit apps can't be on it.
+# For example:
+# APP_LIST=com.whatsapp, org.telegram.messenger, com.anthropic.claude, com.google.android.apps.translate, com.google.android.calculator
+APP_LIST=
+
+# yes: every app that isn't on APP_LIST is paused, apart from the phone's
+# basics (calls, messages, contacts, clock, keyboard, Settings) and Firefox.
+# Install the apps you want to keep before you set this up: an app installed
+# later is paused until it's on the list.
+ONLY_LISTED_APPS=no
+
+# yes: the screen stays black and white.
+BLACK_AND_WHITE=yes
+
+# Apps that may show colour. Empty: the maps apps (Google Maps, CoMaps and
+# Organic Maps). none: no colour at all.
+COLOR_APPS=
+
+# More apps to pause, as Feed Guard pauses other browsers.
+BLOCK_APPS=
+
+# Apps OwnDroid hides, so they're gone from the phone until OwnDroid shows them
+# again: Chrome, Firefox Focus and the NextDNS app. Apps that aren't on the
+# phone are skipped.
+HIDE_APPS=com.android.chrome org.mozilla.focus io.nextdns.NextDNS
+
+# More apps that can't be uninstalled, stopped or have their data cleared.
+# Feed Guard, Watch Limit and Firefox always get this.
+PROTECT_APPS=
+
+# yes: the default apps (browser, home screen, phone app) are locked once set,
+# on Android 14 and newer. Left empty, it follows ONLY_LISTED_APPS: Android never
+# pauses the default home screen or phone app, so a new default would get past
+# the list.
+LOCK_DEFAULT_APPS=
+
+# The add-on's page on addons.mozilla.org, which the kit then opens in Firefox.
+# Empty: you look up Reddit NSFW Blocker there yourself.
+ADDON_PAGE=
+
+# yes: the kit switches OwnDroid's restrictions, hidden apps and protected apps
+# on itself, through OwnDroid's API. The API is on only during setup, with a key
+# made for that phone, and the kit doesn't finish until it's off again.
+# no: you switch them on in OwnDroid, from the list the kit shows.
+USE_OWNDROID_API=yes
