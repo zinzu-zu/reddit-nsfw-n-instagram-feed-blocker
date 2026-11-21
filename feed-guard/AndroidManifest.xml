@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.zinzuzu.feedguard"
-    android:versionCode="3"
-    android:versionName="0.2.1">
+    android:versionCode="4"
+    android:versionName="0.3.0">
 
     <!-- Find browsers and Instagram or Reddit apps among installed apps. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
@@ -10,8 +10,9 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Granted once over adb, never by a dialog. Used only to keep colour correction
-         on Grayscale and to switch Feed Guard's own accessibility access back on
-         (see SecureSettings). -->
+         on Grayscale, to switch Feed Guard's own accessibility access back on, and to
+         switch Feed Guard and Watch Limit off and on again for banking mode (see
+         SecureSettings and BankMode). -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <application
@@ -27,6 +28,22 @@
 
         <activity
             android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The "Open bank app" icon: banking mode first, then the bank app. -->
+        <activity
+            android:name=".BankActivity"
+            android:label="@string/bank_shortcut"
+            android:icon="@drawable/ic_bank"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -60,5 +77,10 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- "Turn back on now" on banking mode's notification. -->
+        <receiver
+            android:name=".BankReceiver"
+            android:exported="false" />
     </application>
 </manifest>

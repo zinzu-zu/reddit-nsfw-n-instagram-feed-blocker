@@ -35,7 +35,7 @@ If it stops, because the cable came out, you pressed Ctrl-C or a check didn't pa
 1. adb: `brew install android-platform-tools`. Or skip it: **Set up a phone.command** offers to download Android's platform tools from Google into this folder.
 2. owndroid-key, installed as [its README](../owndroid-key/README.md) says. If it was installed before `seal --new-phone` existed, an administrator runs `sudo bash install.sh` in the new owndroid-key folder once, which keeps the sealed key.
 3. This folder, next to owndroid-key in /Users/Shared. Its `apks` folder holds the apps:
-   - `FeedGuard-0.2.0.apk` and `WatchLimit-1.0.apk` come with the kit.
+   - `FeedGuard-0.3.0.apk` and `WatchLimit-1.0.apk` come with the kit.
    - OwnDroid: on the first run the kit downloads the regular OwnDroid v8.4 APK (never the testkey one) from its GitHub release. It keeps the APK and its fingerprint in `apks/OwnDroid.apk.sha256`, so every phone gets the same copy. You can also download it yourself and put it in `apks`.
    - `apks/extra`: any other APK, such as Firefox or your own apps. Each one is installed once on every phone.
 4. Your settings: the first run makes `my-phone.conf` from `my-phone.conf.example`. Put in your NextDNS address and your apps. **Set up a phone.command** opens it in TextEdit for you.

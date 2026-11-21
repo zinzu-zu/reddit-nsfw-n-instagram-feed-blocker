@@ -18,6 +18,7 @@ import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityWindowInfo;
 
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -30,7 +31,8 @@ import java.util.Set;
  *
  * It also pauses apps through OwnDroid (AppGate), keeps the screen black and
  * white (ColorGuard), and if its accessibility access is switched off, it
- * switches it back on, or failing that pauses Firefox.
+ * switches it back on, or failing that pauses Firefox. When a bank app comes
+ * on screen, it switches itself and Watch Limit off for banking mode (BankMode).
  */
 public final class GuardService extends AccessibilityService {
     private static final long MIN_GAP_MS = 600;
@@ -41,6 +43,8 @@ public final class GuardService extends AccessibilityService {
     private static final long URL_UNREADABLE_MS = 60_000;
     /** Package changes come in bursts (an update can fire several): scan once they settle. */
     private static final long SCAN_DELAY_MS = 400;
+    /** If banking mode couldn't start, try again at most this often while the bank app stays on screen. */
+    private static final long BANK_RETRY_MS = 10_000;
 
     private static volatile boolean connected;
 
@@ -66,6 +70,9 @@ public final class GuardService extends AccessibilityService {
     private boolean receiversRegistered;
     private final Set<String> freshInstalls = new HashSet<>();
     private boolean scanQueued;
+    /** BankMode.bankApps(), kept up to date on the background thread. */
+    private volatile Set<String> bankApps = Collections.emptySet();
+    private volatile long bankTriedAt = -BANK_RETRY_MS;
 
     private final Runnable check = new Runnable() {
         @Override public void run() { runCheck(); }
@@ -85,13 +92,18 @@ public final class GuardService extends AccessibilityService {
         colors = cg;
         running = true;
         connected = true;
+        // Switched back on while banking mode held (by hand, in Accessibility settings):
+        // that ends banking mode, so Watch Limit comes back on too.
+        final boolean duringBanking = BankMode.active(this);
         registerReceivers();
         bg.post(new Runnable() {
             @Override public void run() {
+                if (duringBanking) BankMode.standUp(GuardService.this, "Feed Guard was switched back on");
                 cg.start();
                 AppGate.releaseFirefox(GuardService.this);
                 AppGate.scan(GuardService.this, null);
                 WatchdogJob.schedule(GuardService.this);
+                bankApps = new HashSet<>(BankMode.bankApps(GuardService.this));
             }
         });
         queueCheck(0);
@@ -105,6 +117,9 @@ public final class GuardService extends AccessibilityService {
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             ColorGuard cg = colors;
             if (cg != null) cg.onWindowsChanged();
+        }
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && pkg != null && bankApps.contains(pkg.toString())) {
+            startBanking(pkg.toString());
         }
         boolean fromFirefox = pkg != null && Guard.FIREFOX.contentEquals(pkg);
         if (fromFirefox || firefoxWasVisible
@@ -120,13 +135,35 @@ public final class GuardService extends AccessibilityService {
     }
 
     /**
+     * A bank app came on screen: banking mode, on its own thread, since it
+     * switches this service off. The bank may already have checked and refused
+     * by then; it opens the next time (the "Open bank app" icon avoids that).
+     */
+    private void startBanking(final String bankPkg) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - bankTriedAt < BANK_RETRY_MS) return;
+        bankTriedAt = now;
+        final Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                BankMode.standDown(app, bankPkg);
+            }
+        }, "feedguard-bank").start();
+    }
+
+    /**
      * Called when the access is switched off. With the secure settings
      * permission Feed Guard switches it straight back on. Without it, the
-     * dead-man switch pauses Firefox.
+     * dead-man switch pauses Firefox. Banking mode switches it off on purpose:
+     * then Firefox is already paused, and BankMode switches it back on.
      */
     @Override
     public boolean onUnbind(Intent intent) {
         connected = false;
+        if (BankMode.active(this)) {
+            shutDown();
+            return false;
+        }
         boolean stillOn = SecureSettings.keepServiceOn(this);
         if (!stillOn && Guard.armed(this)) AppGate.pauseFirefox(this);
         WatchdogJob.checkSoon(this);
@@ -363,6 +400,8 @@ public final class GuardService extends AccessibilityService {
                 scanQueued = false;
             }
             AppGate.scan(GuardService.this, fresh);
+            // An app installed, paused or set as a bank app may have changed which bank apps can open.
+            bankApps = new HashSet<>(BankMode.bankApps(GuardService.this));
         }
     };
 }

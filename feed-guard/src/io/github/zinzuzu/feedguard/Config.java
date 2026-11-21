@@ -17,6 +17,7 @@ final class Config {
     static final String ONLY_LISTED = "only_listed_apps";
     static final String GRAYSCALE = "grayscale";
     static final String COLOR_APPS = "color_apps";
+    static final String BANK_APPS = "bank_apps";
 
     /** The list: apps Feed Guard never pauses. Default: none. */
     final Set<String> allowed;
@@ -28,6 +29,8 @@ final class Config {
     final boolean grayscale;
     /** Apps that may show colour. Default: the maps apps in ColorRules. */
     final Set<String> colourApps;
+    /** Apps that switch Feed Guard and Watch Limit off while they open (banking mode). Default: Nubank. */
+    final Set<String> bankApps;
 
     private Config(Bundle b) {
         allowed = AppRules.parseList(string(b, ALLOWED));
@@ -35,6 +38,7 @@ final class Config {
         listMode = bool(b, ONLY_LISTED, false);
         grayscale = bool(b, GRAYSCALE, true);
         colourApps = ColorRules.colourApps(b.containsKey(COLOR_APPS) ? string(b, COLOR_APPS) : null);
+        bankApps = BankRules.bankApps(b.containsKey(BANK_APPS) ? string(b, BANK_APPS) : null);
     }
 
     static Config read(Context c) {

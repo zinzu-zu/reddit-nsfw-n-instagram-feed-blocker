@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -34,8 +35,9 @@ import java.util.TreeSet;
 
 /**
  * Status screen. It only shows state and links to Android's settings: there is
- * deliberately no switch here that turns any protection off. Settings live in
- * OwnDroid's managed configuration for Feed Guard.
+ * deliberately no switch here that turns any protection off. (Its one button
+ * for banking mode only ends it early.) Settings live in OwnDroid's managed
+ * configuration for Feed Guard.
  */
 public final class MainActivity extends Activity {
     private LinearLayout list;
@@ -80,11 +82,21 @@ public final class MainActivity extends Activity {
                 + (cfg.listMode ? " Only the apps on your list open." : "")
                 + (cfg.grayscale && secure ? " The screen stays black and white, except in maps." : ""), 15));
 
+        boolean banking = BankMode.active(this);
+        String bankingUntil = banking ? time(BankMode.endsAt(this)) : "";
+        if (banking) bankRow(cfg, secure);
+
         boolean on = Guard.serviceEnabled(this);
-        row(on, "Accessibility access",
-                on ? (secure ? "On. If it's switched off, Feed Guard switches it back on." : "On.")
-                        : "Off. Turn on Feed Guard in Settings › Accessibility.",
-                on ? null : "Open accessibility settings", go(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        if (banking && !on) {
+            row(false, "Accessibility access",
+                    "Off for banking mode until " + bankingUntil + ". Then Feed Guard switches it back on by itself.",
+                    null, null);
+        } else {
+            row(on, "Accessibility access",
+                    on ? (secure ? "On. If it's switched off, Feed Guard switches it back on." : "On.")
+                            : "Off. Turn on Feed Guard in Settings › Accessibility.",
+                    on ? null : "Open accessibility settings", go(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        }
 
         boolean delegated = AppGate.delegated(this);
         row(delegated, "Permission from OwnDroid",
@@ -105,6 +117,8 @@ public final class MainActivity extends Activity {
         } else {
             row(true, "Black and white", "On. " + colourText(cfg.colourApps), null, null);
         }
+
+        if (!banking) bankRow(cfg, secure);
 
         long armedAt = p.getLong(Guard.K_ARMED_AT, 0);
         long markerAt = p.getLong(Guard.K_MARKER_SEEN_AT, 0);
@@ -128,7 +142,8 @@ public final class MainActivity extends Activity {
         boolean ffPaused = p.getBoolean(Guard.K_FIREFOX_PAUSED, false);
         boolean ffNotListed = AppGate.stored(p, Guard.K_OURS).contains(Guard.FIREFOX);
         row(!ffPaused, "Firefox",
-                ffPaused ? "Paused, because Feed Guard's accessibility access was off. It opens again once the access is back on."
+                ffPaused && banking ? "Paused during banking mode. It opens again once Feed Guard is back on, at " + bankingUntil + " at the latest."
+                        : ffPaused ? "Paused, because Feed Guard's accessibility access was off. It opens again once the access is back on."
                         : ffNotListed ? "Paused, because it isn't on your list."
                         : "Not paused by Feed Guard.",
                 null, null);
@@ -196,6 +211,57 @@ public final class MainActivity extends Activity {
             list.addView(v);
         } catch (PackageManager.NameNotFoundException ignored) {
             // Can't happen for our own package.
+        }
+    }
+
+    /**
+     * Banking mode: while it's on, when it ends and a button to end it now;
+     * otherwise whether it's ready, and for which bank app.
+     */
+    private void bankRow(Config cfg, boolean secure) {
+        if (BankMode.active(this)) {
+            String until = time(BankMode.endsAt(this));
+            String bank = BankMode.bankApp(this);
+            String name = bank.isEmpty() ? "your bank app" : Guard.labels(this, Collections.singleton(bank));
+            row(false, "Banking mode",
+                    "On until " + until + ". Feed Guard and Watch Limit are off so " + name + " can open. "
+                            + "Firefox and YouTube stay paused until they're back on.",
+                    "Turn the guards back on now", new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            v.setEnabled(false);
+                            final Context app = getApplicationContext();
+                            new Thread(new Runnable() {
+                                @Override public void run() {
+                                    BankMode.standUp(app, "tapped on the status screen");
+                                    runOnUiThread(new Runnable() {
+                                        @Override public void run() {
+                                            if (!isFinishing()) render();
+                                        }
+                                    });
+                                }
+                            }, "feedguard-bank").start();
+                        }
+                    });
+            return;
+        }
+        if (cfg.bankApps.isEmpty()) {
+            row(true, "Banking mode", "Off in OwnDroid's settings for Feed Guard.", null, null);
+            return;
+        }
+        List<String> banks = BankMode.bankApps(this);
+        if (!secure) {
+            row(false, "Banking mode", "Waiting for the secure settings permission.", null, null);
+        } else if (banks.isEmpty()) {
+            row(false, "Banking mode", Guard.labels(this, cfg.bankApps) + " can't open: it isn't installed, or it's paused.",
+                    null, null);
+        } else {
+            row(true, "Banking mode",
+                    "Ready for " + Guard.labels(this, banks) + ". Bank apps refuse to open while Feed Guard and Watch Limit are on, "
+                            + "so opening one switches both off for " + (BankRules.WINDOW_MS / 60_000) + " minutes, "
+                            + "with Firefox and YouTube paused meanwhile. Open it with the Open bank app icon, "
+                            + "which switches them off before the bank app starts. When you're done, "
+                            + "tap Turn back on now in the notification.",
+                    null, null);
         }
     }
 
@@ -334,6 +400,10 @@ public final class MainActivity extends Activity {
 
     private String when(long wallMs) {
         return DateUtils.formatDateTime(this, wallMs, DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_SHOW_TIME);
+    }
+
+    private String time(long wallMs) {
+        return DateUtils.formatDateTime(this, wallMs, DateUtils.FORMAT_SHOW_TIME);
     }
 
     private String ago(long wallMs) {

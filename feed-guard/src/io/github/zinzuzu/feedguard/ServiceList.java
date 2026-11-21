@@ -37,6 +37,43 @@ final class ServiceList {
         return b.append(service).toString();
     }
 
+    /**
+     * Splits the list in two: the services of the given apps, and all the
+     * others. Items are kept exactly as written, so they can be put back as
+     * they were. Other apps' services are never touched.
+     *
+     * @return {the list without those apps' services, those services}; each
+     *         colon-separated, "" when empty
+     */
+    static String[] without(String list, java.util.Set<String> packages) {
+        StringBuilder kept = new StringBuilder();
+        StringBuilder taken = new StringBuilder();
+        if (list != null) {
+            for (String item : list.split(":")) {
+                String t = item.trim();
+                if (t.isEmpty()) continue;
+                String pkg = packageOf(t);
+                StringBuilder to = pkg != null && packages != null && packages.contains(pkg) ? taken : kept;
+                if (to.length() > 0) to.append(':');
+                to.append(t);
+            }
+        }
+        return new String[] {kept.toString(), taken.toString()};
+    }
+
+    /** The list with each item of items (colon-separated) added at the end, unless it's already there. */
+    static String withAll(String list, String items) {
+        String out = list == null ? "" : list;
+        if (items == null) return out;
+        for (String item : items.split(":")) {
+            String t = item.trim();
+            if (t.isEmpty()) continue;
+            String next = withService(out, t);
+            if (next != null) out = next;
+        }
+        return out;
+    }
+
     /** The package of a component name such as "com.example/.Ime", or null. */
     static String packageOf(String component) {
         String[] parts = split(component == null ? null : component.trim());

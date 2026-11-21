@@ -12,7 +12,9 @@ import android.util.Log;
 /**
  * What the secure settings permission (WRITE_SECURE_SETTINGS, granted once
  * over adb) is used for, and nothing else: keeping colour correction on
- * Grayscale, and turning Feed Guard's own accessibility access back on.
+ * Grayscale, turning Feed Guard's own accessibility access back on, and
+ * switching Feed Guard and Watch Limit off and on again for banking mode
+ * (BankMode).
  */
 final class SecureSettings {
     private SecureSettings() {}
@@ -76,9 +78,11 @@ final class SecureSettings {
 
     /**
      * Puts Feed Guard back among the switched-on accessibility services, if
-     * something took it out. Returns whether it's switched on now.
+     * something took it out. Returns whether it's switched on now. During
+     * banking mode it stays off on purpose (BankMode switches it back on).
      */
     static synchronized boolean keepServiceOn(Context c) {
+        if (BankMode.active(c)) return false;
         ContentResolver cr = c.getContentResolver();
         String me = new ComponentName(c, GuardService.class).flattenToString();
         String list;

@@ -33,4 +33,10 @@
         android:description="@string/r_blocked_desc"
         android:restrictionType="string"
         android:defaultValue="" />
+    <restriction
+        android:key="bank_apps"
+        android:title="@string/r_bank_title"
+        android:description="@string/r_bank_desc"
+        android:restrictionType="string"
+        android:defaultValue="com.nu.production" />
 </restrictions>

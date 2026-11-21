@@ -14,7 +14,7 @@ import java.util.TreeSet;
  * Tests for the parts of Feed Guard that don't need a phone: reading the
  * address bar, the add-on's marker, the cover decision, the app rules (with
  * "Only apps on the list"), when colour is allowed, the accessibility
- * services list and signature pins.
+ * services list, banking mode and signature pins.
  * Run with test/run.sh. No test framework, so it runs on a plain JDK.
  */
 public final class LogicTest {
@@ -29,6 +29,9 @@ public final class LogicTest {
         listRule();
         colourRules();
         serviceList();
+        bankServices();
+        bankRules();
+        bankTexts();
         pins();
         System.out.println(passed + " passed, " + failed + " failed");
         if (failed > 0) System.exit(1);
@@ -502,6 +505,117 @@ public final class LogicTest {
     }
 
     // --- Signature pins -----------------------------------------------------
+
+    // --- Banking mode ------------------------------------------------------
+
+    static final String FG = "io.github.zinzuzu.feedguard/io.github.zinzuzu.feedguard.GuardService";
+    static final String WL = "io.github.zinzuzu.watchlimit/io.github.zinzuzu.watchlimit.WatchService";
+    static final String TALKBACK = "com.google.android.marvin.talkback/.TalkBackService";
+
+    /** Switching only Feed Guard and Watch Limit off, and putting back exactly what was there. */
+    static void bankServices() {
+        Set<String> ours = BankRules.GUARD_PACKAGES;
+        String[] s = ServiceList.without(TALKBACK + ":" + FG + ":" + WL, ours);
+        eq("bank: others stay on", TALKBACK, s[0]);
+        eq("bank: both guards taken off, as written", FG + ":" + WL, s[1]);
+
+        String[] shortForm = ServiceList.without("io.github.zinzuzu.feedguard/.GuardService", ours);
+        eq("bank: short form taken off too", "", shortForm[0]);
+        eq("bank: short form kept as written", "io.github.zinzuzu.feedguard/.GuardService", shortForm[1]);
+
+        String[] none = ServiceList.without(TALKBACK, ours);
+        eq("bank: nothing of ours: list unchanged", TALKBACK, none[0]);
+        eq("bank: nothing of ours: nothing taken", "", none[1]);
+        eq("bank: empty list", "", ServiceList.without(null, ours)[0]);
+        eq("bank: stray colons dropped", TALKBACK, ServiceList.without(":" + TALKBACK + "::" + FG + ":", ours)[0]);
+        eq("bank: a similar package isn't ours", "io.github.zinzuzu.feedguardx/.X",
+                ServiceList.without("io.github.zinzuzu.feedguardx/.X", ours)[0]);
+        eq("bank: garbage is left alone", "garbage", ServiceList.without("garbage", ours)[0]);
+
+        // Round trip: off, then back on, gives every service back.
+        String before = TALKBACK + ":" + FG + ":" + WL;
+        String[] off = ServiceList.without(before, ours);
+        String back = ServiceList.withAll(off[0], off[1]);
+        check("bank: round trip keeps TalkBack", ServiceList.contains(back, TALKBACK));
+        check("bank: round trip brings Feed Guard back", ServiceList.contains(back, FG));
+        check("bank: round trip brings Watch Limit back", ServiceList.contains(back, WL));
+        eq("bank: putting back onto nothing", FG + ":" + WL, ServiceList.withAll("", FG + ":" + WL));
+        eq("bank: putting back onto null", FG, ServiceList.withAll(null, FG));
+        eq("bank: already back: no duplicate", TALKBACK + ":" + FG, ServiceList.withAll(TALKBACK + ":" + FG, FG));
+        eq("bank: nothing to put back", TALKBACK, ServiceList.withAll(TALKBACK, ""));
+        eq("bank: null to put back", TALKBACK, ServiceList.withAll(TALKBACK, null));
+    }
+
+    static void bankRules() {
+        eq("bank apps: Nubank unless set", set("com.nu.production"), BankRules.bankApps(null));
+        eq("bank apps: none", 0, BankRules.bankApps("none").size());
+        eq("bank apps: None, any case", 0, BankRules.bankApps(" NONE ").size());
+        eq("bank apps: blank means none", 0, BankRules.bankApps("  ").size());
+        eq("bank apps: a list", set("com.nu.production", "com.revolut.revolut"),
+                BankRules.bankApps("com.nu.production, com.revolut.revolut"));
+        // Listing these must never switch the guards off.
+        eq("bank apps: never Firefox", 0, BankRules.bankApps("org.mozilla.firefox").size());
+        eq("bank apps: never Instagram", 0, BankRules.bankApps("com.instagram.android").size());
+        eq("bank apps: never a Reddit app", 0, BankRules.bankApps("com.reddit.frontpage").size());
+        eq("bank apps: never a feed app by name", 0, BankRules.bankApps("org.quantumbadger.redreader").size());
+        eq("bank apps: never the Play Store", 0, BankRules.bankApps("com.android.vending").size());
+        eq("bank apps: never OwnDroid", 0, BankRules.bankApps("com.bintianqi.owndroid").size());
+        eq("bank apps: never Watch Limit", 0, BankRules.bankApps("io.github.zinzuzu.watchlimit").size());
+        eq("bank apps: never Feed Guard", 0, BankRules.bankApps("io.github.zinzuzu.feedguard").size());
+        eq("bank apps: never Settings", 0, BankRules.bankApps("com.android.settings").size());
+        eq("bank apps: the bad one dropped, the bank kept", set("com.nu.production"),
+                BankRules.bankApps("org.mozilla.firefox, com.nu.production"));
+        check("may be bank: null", !BankRules.mayBeBank(null));
+        check("may be bank: empty", !BankRules.mayBeBank(""));
+        check("may be bank: Wise", BankRules.mayBeBank("com.transferwise.android"));
+
+        long w = BankRules.WINDOW_MS;
+        long t = 5_000_000L;
+        long until = BankRules.deadline(t);
+        eq("deadline: one window on", t + w, until);
+        check("active: just started", BankRules.active(7, until, 7, t));
+        check("active: a second before the end", BankRules.active(7, until, 7, until - 1000));
+        check("over: at the end", !BankRules.active(7, until, 7, until));
+        check("over: after the end", !BankRules.active(7, until, 7, until + 1));
+        check("over: after a restart", !BankRules.active(7, until, 8, 1000));
+        // The case only the start-up count catches: banking mode began a minute after
+        // start-up, the phone restarted, and two minutes later the old end time still
+        // looks less than one window away.
+        long early = BankRules.deadline(60_000L);
+        check("over: after a quick restart, though the old end time looks near",
+                !BankRules.active(7, early, 8, 120_000L));
+        check("active: the same start-up, a minute in", BankRules.active(7, early, 7, 120_000L));
+        check("over: start-up count unknown then", !BankRules.active(BankRules.UNKNOWN_BOOT, until, 7, t));
+        check("over: start-up count unknown now", !BankRules.active(7, until, BankRules.UNKNOWN_BOOT, t));
+        check("over: never started", !BankRules.active(7, 0, 7, t));
+        check("over: an end too far away to be ours", !BankRules.active(7, t + w + 1, 7, t));
+        check("over: an end a whole day away", !BankRules.active(7, t + 86_400_000L, 7, t));
+        check("active: an end exactly one window away", BankRules.active(7, t + w, 7, t));
+    }
+
+    /** The texts that give banking mode's times in words say what BankRules does. */
+    static void bankTexts() {
+        String dir = System.getProperty("feedguard.dir");
+        check("texts: feedguard.dir is set (run test/run.sh)", dir != null);
+        if (dir == null) return;
+        String minutes = (BankRules.WINDOW_MS / 60_000) + " minutes";
+        String seconds = (BankRules.CHECK_EVERY_MS / 1000) + " seconds";
+        String strings = read(dir + "/res/values/strings.xml");
+        String readme = read(dir + "/README.md");
+        check("texts: the window is whole minutes", BankRules.WINDOW_MS % 60_000 == 0);
+        check("texts: strings.xml says " + minutes, strings.contains("for " + minutes));
+        check("texts: the README says " + minutes, readme.contains("for " + minutes));
+        check("texts: the README says every " + seconds, readme.contains("every " + seconds));
+    }
+
+    static String read(String path) {
+        try {
+            return new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path)),
+                    java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            return "";
+        }
+    }
 
     static void pins() {
         Map<String, String> parsed = Pins.parse(Arrays.asList("com.whatsapp=0A1b", "broken", "=00", "org.x=", "org.y=zz", "org.z=abc"));

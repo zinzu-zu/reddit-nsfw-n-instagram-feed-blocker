@@ -94,7 +94,19 @@ final class AppGate {
     }
 
     /** The dead-man switch: Feed Guard's access is off, so Firefox stops opening. */
-    static synchronized void pauseFirefox(Context c) {
+    static void pauseFirefox(Context c) {
+        pauseFirefox(c, true);
+    }
+
+    /**
+     * The same pause for banking mode, without the dead-man notification: banking
+     * mode's own notification says why Firefox is paused and when it opens again.
+     */
+    static void pauseFirefoxQuietly(Context c) {
+        pauseFirefox(c, false);
+    }
+
+    private static synchronized void pauseFirefox(Context c, boolean notify) {
         SharedPreferences p = Guard.prefs(c);
         if (p.getBoolean(Guard.K_FIREFOX_PAUSED, false)) return;
         if (!isInstalled(c, Guard.FIREFOX)) return;
@@ -111,7 +123,7 @@ final class AppGate {
         Set<String> failed = setPaused(c, Collections.singleton(Guard.FIREFOX), true);
         if (failed != null && failed.isEmpty()) {
             p.edit().putBoolean(Guard.K_FIREFOX_PAUSED, true).commit();
-            Guard.notify(c, Guard.N_FIREFOX_PAUSED, "Firefox is paused",
+            if (notify) Guard.notify(c, Guard.N_FIREFOX_PAUSED, "Firefox is paused",
                     "Feed Guard's accessibility access is off. Turn Feed Guard back on in Settings > Accessibility, and Firefox opens again.",
                     new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         }
